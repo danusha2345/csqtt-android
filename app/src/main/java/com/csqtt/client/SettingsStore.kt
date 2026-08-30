@@ -66,7 +66,9 @@ class SettingsStore(context: Context) {
         private val SHOW_SYSTEM_APPS = booleanPreferencesKey("show_system_apps")
         private val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
         private val CSQTT_LINK = stringPreferencesKey("csqtt_link")
+        private val CSQTT_LINK_ENCRYPTED = stringPreferencesKey("csqtt_link_encrypted")
         private val CSQTT_LINK_MODE = booleanPreferencesKey("csqtt_link_mode")
+        private val ACTIVE_VK_CALL_SESSION_ENCRYPTED = stringPreferencesKey("active_vk_call_session_encrypted")
 
         private val PEER = stringPreferencesKey("peer")
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
@@ -190,7 +192,7 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_WEB_LOGIN, DEPLOY_WEB_PASSWORD, DEPLOY_WEB_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_ENCRYPTED, SSH_KEY_PASSPHRASE, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_CERTIFICATE, SSH_CERTIFICATE_ENCRYPTED, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_WEB_LOGIN, DEPLOY_WEB_PASSWORD, DEPLOY_WEB_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, CSQTT_LINK_ENCRYPTED, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_ENCRYPTED, SSH_KEY_PASSPHRASE, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_CERTIFICATE, SSH_CERTIFICATE_ENCRYPTED, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, SERVER_PEER_PORT, PROXY_PORT, SERVER_WEB_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 MANUAL_PORTS_ENABLED, NO_DNS, IS_WHITELIST, CSQTT_LINK_MODE, DETAILED_LOGS, SSH_KEYS_MODE, DOCKER_INSTALL, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
@@ -234,8 +236,8 @@ class SettingsStore(context: Context) {
     val loggingEnabled: Flow<Boolean> = dataStore.data.map { it[LOGGING_ENABLED] ?: true }
     val csqttLink: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(CSQTT_LINK, profile)] ?: ""
-    }
+        readSecret(prefs, CSQTT_LINK_ENCRYPTED, CSQTT_LINK, profile)
+    }.onIo()
     val csqttLinkMode: Flow<Boolean> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false
@@ -631,7 +633,7 @@ class SettingsStore(context: Context) {
     suspend fun saveCsqttLink(link: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(CSQTT_LINK, profile)] = link
+            prefs.putSecret(CSQTT_LINK_ENCRYPTED, CSQTT_LINK, link, profile)
         }
     }
 
@@ -640,6 +642,23 @@ class SettingsStore(context: Context) {
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = enabled
         }
+    }
+
+    suspend fun loadActiveVkCallSession(): String = dataStore.data.first()
+        .let { secureStore.decrypt(it[ACTIVE_VK_CALL_SESSION_ENCRYPTED]).orEmpty() }
+
+    suspend fun saveActiveVkCallSession(session: String) {
+        dataStore.edit { prefs ->
+            if (session.isBlank()) {
+                prefs.remove(ACTIVE_VK_CALL_SESSION_ENCRYPTED)
+            } else {
+                prefs[ACTIVE_VK_CALL_SESSION_ENCRYPTED] = secureStore.encrypt(session)
+            }
+        }
+    }
+
+    suspend fun clearActiveVkCallSession() {
+        dataStore.edit { it.remove(ACTIVE_VK_CALL_SESSION_ENCRYPTED) }
     }
 
     suspend fun saveWorkersPerHash(workersPerHash: Int) {
@@ -915,6 +934,11 @@ class SettingsStore(context: Context) {
                 prefs.migrateSecret(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile), getProfileKey(CONNECTION_PASSWORD, profile))
                 prefs.migrateSecret(getProfileKey(DEPLOY_MAIN_PASSWORD_ENCRYPTED, profile), getProfileKey(DEPLOY_MAIN_PASSWORD, profile))
                 prefs.migrateSecret(getProfileKey(DEPLOY_WEB_PASSWORD_ENCRYPTED, profile), getProfileKey(DEPLOY_WEB_PASSWORD, profile))
+                prefs.migrateSecret(getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile), getProfileKey(VK_ACCESS_TOKEN, profile))
+                prefs.migrateSecret(getProfileKey(SSH_PRIVATE_KEY_ENCRYPTED, profile), getProfileKey(SSH_PRIVATE_KEY, profile))
+                prefs.migrateSecret(getProfileKey(SSH_KEY_PASSPHRASE_ENCRYPTED, profile), getProfileKey(SSH_KEY_PASSPHRASE, profile))
+                prefs.migrateSecret(getProfileKey(SSH_CERTIFICATE_ENCRYPTED, profile), getProfileKey(SSH_CERTIFICATE, profile))
+                prefs.migrateSecret(getProfileKey(CSQTT_LINK_ENCRYPTED, profile), getProfileKey(CSQTT_LINK, profile))
             }
         }
     }

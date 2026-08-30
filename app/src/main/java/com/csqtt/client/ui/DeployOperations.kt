@@ -9,7 +9,7 @@ import com.csqtt.client.DeployManager
 import com.csqtt.client.TunnelManager
 import net.schmizz.sshj.SSHClient as SshjClient
 import net.schmizz.sshj.xfer.FileSystemFile
-import net.schmizz.sshj.transport.verification.PromiscuousVerifier
+import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.userauth.UserAuthException
 import net.schmizz.sshj.userauth.method.AuthKeyboardInteractive
 import net.schmizz.sshj.userauth.method.PasswordResponseProvider
@@ -18,6 +18,8 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.security.PublicKey
 import java.security.Security
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -399,6 +401,35 @@ private class DeploySSHClient(
 
 private val bcInitialized = AtomicBoolean(false)
 
+internal object SshHostKeyPins {
+    private const val PREFS_NAME = "ssh_host_key_pins"
+
+    internal fun key(host: String, port: Int): String = "${host.lowercase()}:$port"
+
+    internal fun fingerprint(publicKey: PublicKey): String =
+        java.util.Base64.getEncoder().encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(publicKey.encoded),
+        )
+
+    internal fun verify(context: Context, host: String, port: Int, publicKey: PublicKey): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val key = key(host, port)
+        val candidate = fingerprint(publicKey)
+        synchronized(this) {
+            val pinned = prefs.getString(key, null)
+            if (pinned != null) return MessageDigest.isEqual(pinned.toByteArray(), candidate.toByteArray())
+            return prefs.edit().putString(key, candidate).commit()
+        }
+    }
+}
+
+private class TofuHostKeyVerifier(private val context: Context) : HostKeyVerifier {
+    override fun verify(hostname: String, port: Int, key: PublicKey): Boolean =
+        SshHostKeyPins.verify(context, hostname, port, key)
+
+    override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
+}
+
 private fun ensureBouncyCastle() {
     if (bcInitialized.compareAndSet(false, true)) {
         Security.removeProvider("BC")
@@ -407,6 +438,7 @@ private fun ensureBouncyCastle() {
 }
 
 private fun createSSHClient(
+    context: Context,
     host: String,
     user: String,
     pass: String,
@@ -424,7 +456,7 @@ private fun createSSHClient(
     val ssh = SshjClient()
     ssh.connectTimeout = 30000
     ssh.timeout = 300000
-    ssh.addHostKeyVerifier(PromiscuousVerifier())
+    ssh.addHostKeyVerifier(TofuHostKeyVerifier(context.applicationContext))
 
     try {
         ssh.connect(host, port)
@@ -545,12 +577,12 @@ internal suspend fun performDeploy(
 
         TunnelManager.addDeployInfoLog("SSH/SFTP используют текущий системный маршрут")
         TunnelManager.addDeployInfoLog("Подключение к VPS по SSH")
-        val initialSsh = createSSHClient(host, user, pass, port, privateKey, keyPassphrase)
+        val initialSsh = createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase)
         ssh = initialSsh
         DeployManager.activeSession = initialSsh
         val sshClient = DeploySSHClient(initialSsh, pass) { stage ->
             TunnelManager.addDeployInfoLog("Повторное SSH-подключение: $stage")
-            createSSHClient(host, user, pass, port, privateKey, keyPassphrase).also {
+            createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase).also {
                 ssh = it
             }
         }
@@ -689,7 +721,7 @@ internal suspend fun performUninstall(
         onProgress(0.05f, "Подключение...")
         TunnelManager.addDeployInfoLog("SSH/SFTP используют текущий системный маршрут")
         TunnelManager.addDeployInfoLog("Подключение к VPS по SSH")
-        ssh = createSSHClient(host, user, pass, port, privateKey, keyPassphrase)
+        ssh = createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase)
         DeployManager.activeSession = ssh
         val sshClient = DeploySSHClient(ssh, pass)
         TunnelManager.addDeploySuccessLog("SSH-соединение установлено")

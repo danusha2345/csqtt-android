@@ -839,7 +839,7 @@ class TunnelService : Service() {
         resourcesReleased = true
         stopWifiAutoPauseWatch()
         CaptchaWebViewManager.onTunnelStop()
-        if (finishVkCalls) VkAutoCallsManager.finishActiveCalls()
+        if (finishVkCalls) VkAutoCallsManager.finishActiveCalls(applicationContext)
         TunnelManager.stop(finishVkCalls)
         releaseWakeLock()
         releaseWifiLock()

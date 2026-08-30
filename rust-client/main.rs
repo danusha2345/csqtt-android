@@ -509,7 +509,9 @@ fn apply_stdin_credentials(arguments: &mut Arguments, line: &str) -> Result<()> 
         .context("неверный префикс credentials stdin")?;
     let credentials: StdinCredentials =
         serde_json::from_str(payload).context("неверный JSON credentials stdin")?;
-    if credentials.password.is_empty() || credentials.vk.is_empty() {
+    if credentials.password.is_empty()
+        || (credentials.vk.is_empty() && arguments.vk_hash_mode != "auto_js")
+    {
         bail!("credentials stdin не содержит password или vk");
     }
     arguments.password = credentials.password;
@@ -864,6 +866,32 @@ mod worker_count_tests {
             apply_stdin_credentials(
                 &mut arguments,
                 r#"CSQTT_CREDENTIALS|{"password":"","vk":"hash-a"}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn credentials_stdin_allows_empty_vk_only_for_auto_js() {
+        let mut auto_js = Arguments::try_parse_from([
+            "csqtt-client",
+            "--vk-hash-mode",
+            "auto_js",
+            "--credentials-stdin",
+        ])
+        .unwrap();
+        apply_stdin_credentials(
+            &mut auto_js,
+            r#"CSQTT_CREDENTIALS|{"password":"secret","vk":""}"#,
+        )
+        .unwrap();
+
+        let mut manual =
+            Arguments::try_parse_from(["csqtt-client", "--credentials-stdin"]).unwrap();
+        assert!(
+            apply_stdin_credentials(
+                &mut manual,
+                r#"CSQTT_CREDENTIALS|{"password":"secret","vk":""}"#,
             )
             .is_err()
         );

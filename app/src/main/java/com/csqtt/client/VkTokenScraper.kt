@@ -3,13 +3,23 @@
 
 package com.csqtt.client
 
-import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URLDecoder
 import java.net.URL
 
 internal object VkTokenScraper {
+    private val trustedHosts = setOf(
+        "oauth.vk.com",
+        "oauth.vk.ru",
+        "login.vk.com",
+        "login.vk.ru",
+        "id.vk.com",
+        "id.vk.ru",
+    )
+
     suspend fun scrape(cookies: String, userAgent: String): Result<VkAuthPayload> = withContext(Dispatchers.IO) {
         var endpoint = "https://oauth.vk.com/authorize?client_id=7793118&display=mobile&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&response_type=token&scope=1073737727&v=5.199&revoke=1"
         
@@ -34,9 +44,11 @@ internal object VkTokenScraper {
 
                 if (code == HttpURLConnection.HTTP_MOVED_TEMP || code == HttpURLConnection.HTTP_MOVED_PERM || code == HttpURLConnection.HTTP_SEE_OTHER) {
                     val nextLocation = connection.getHeaderField("Location") ?: break
-                    val payload = parseFragment(nextLocation)
+                    val trustedLocation = resolveTrustedUrl(endpoint, nextLocation)
+                        ?: return@withContext Result.failure(IllegalStateException("Untrusted VK OAuth redirect"))
+                    val payload = parseFragment(trustedLocation)
                     if (payload != null) return@withContext Result.success(payload)
-                    endpoint = nextLocation
+                    endpoint = trustedLocation
                     continue
                 }
 
@@ -45,7 +57,8 @@ internal object VkTokenScraper {
 
                     val matchJs = jsLocationRegex.find(htmlContent)
                     if (matchJs != null) {
-                        val scriptTarget = matchJs.groupValues[1]
+                        val scriptTarget = resolveTrustedUrl(endpoint, matchJs.groupValues[1])
+                            ?: return@withContext Result.failure(IllegalStateException("Untrusted VK OAuth script redirect"))
                         val payload = parseFragment(scriptTarget)
                         if (payload != null) return@withContext Result.success(payload)
                         endpoint = scriptTarget
@@ -54,7 +67,8 @@ internal object VkTokenScraper {
 
                     val matchGrant = oauthGrantRegex.find(htmlContent)
                     if (matchGrant != null) {
-                        endpoint = matchGrant.groupValues[1].replace("&amp;", "&")
+                        endpoint = resolveTrustedUrl(endpoint, matchGrant.groupValues[1].replace("&amp;", "&"))
+                            ?: return@withContext Result.failure(IllegalStateException("Untrusted VK OAuth grant redirect"))
                         continue
                     }
                     
@@ -69,18 +83,32 @@ internal object VkTokenScraper {
         }
     }
 
-    private fun parseFragment(urlStr: String): VkAuthPayload? {
-        if (!urlStr.contains("access_token=")) return null
-        
-        val fragmentPart = try {
-            Uri.parse(urlStr).encodedFragment ?: urlStr.substringAfter("#", "").ifEmpty { urlStr.substringAfter("?", "") }
-        } catch (e: Exception) {
-            urlStr.substringAfter("#", "").ifEmpty { urlStr.substringAfter("?", "") }
+    internal fun resolveTrustedUrl(currentUrl: String, target: String): String? {
+        val resolved = runCatching { URI(currentUrl).resolve(target.trim()) }.getOrNull() ?: return null
+        val host = resolved.host?.lowercase() ?: return null
+        if (!resolved.scheme.equals("https", ignoreCase = true) ||
+            resolved.rawUserInfo != null ||
+            resolved.port !in setOf(-1, 443) ||
+            host !in trustedHosts
+        ) {
+            return null
         }
+        return resolved.toASCIIString()
+    }
 
-        val params = fragmentPart.split("&").associate { 
+    internal fun parseFragment(urlStr: String): VkAuthPayload? {
+        val uri = runCatching { URI(urlStr) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase() ?: return null
+        if (!uri.scheme.equals("https", ignoreCase = true) ||
+            uri.port !in setOf(-1, 443) ||
+            host !in setOf("oauth.vk.com", "oauth.vk.ru") ||
+            uri.path != "/blank.html"
+        ) return null
+        val fragmentPart = uri.rawFragment ?: return null
+
+        val params = fragmentPart.split("&").associate {
             val parts = it.split("=", limit = 2)
-            parts[0] to parts.getOrElse(1) { "" }
+            decode(parts[0]) to decode(parts.getOrElse(1) { "" })
         }
 
         val tokenVal = params["access_token"]
@@ -93,4 +121,7 @@ internal object VkTokenScraper {
         }
         return null
     }
+
+    private fun decode(value: String): String =
+        runCatching { URLDecoder.decode(value, Charsets.UTF_8.name()) }.getOrDefault(value)
 }

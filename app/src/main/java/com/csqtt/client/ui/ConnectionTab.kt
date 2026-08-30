@@ -108,10 +108,16 @@ internal fun ConnectionTab(
 
     val parsedLink = remember(csqttLink) { parseCsqttLink(csqttLink) }
     val linkHashes = parsedLink?.hashes.orEmpty()
+    val checkedHashes = remember(vkHashCheckResultsJson) {
+        VkHashValidationCodec.decode(vkHashCheckResultsJson)
+    }
+    val activeLinkHashes = remember(linkHashes, checkedHashes) {
+        VkHashValidationCodec.active(linkHashes, checkedHashes)
+    }
     val manualHashes = remember(vkHashes, vkHashCheckResultsJson) {
         VkHashValidationCodec.active(
             vkHashes.split(Regex("[,\\s\\n]+")),
-            VkHashValidationCodec.decode(vkHashCheckResultsJson),
+            checkedHashes,
         )
     }
     val accountAutoJsMode = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
@@ -121,7 +127,7 @@ internal fun ConnectionTab(
     )
     val vkTokenActive = savedVkAccessToken?.isNotBlank() == true
     val hashesReady = hashSettingsLoaded && when {
-        csqttLinkMode && linkHashes.isNotEmpty() -> true
+        csqttLinkMode && linkHashes.isNotEmpty() -> activeLinkHashes.isNotEmpty()
         autoHashMode -> vkTokenActive
         else -> manualHashes.isNotEmpty()
     }
@@ -130,7 +136,7 @@ internal fun ConnectionTab(
     val isLinkValid = parsedLink != null && hashesReady
     val isValid = if (csqttLinkMode) isLinkValid else isManualValid
     val hashStatus = when {
-        csqttLinkMode && linkHashes.isNotEmpty() -> "${linkHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
+        csqttLinkMode && linkHashes.isNotEmpty() -> "${activeLinkHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
         autoHashMode && vkTokenActive -> "Авто"
         autoHashMode -> "Токен"
         else -> "${manualHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"

@@ -14,6 +14,20 @@ data class ConnectionSource(
     val hashesFromLink: Boolean,
 )
 
+internal fun selectConnectionHashes(
+    linkHashes: List<String>,
+    savedHashes: String,
+    invalidHashes: Map<String, VkHashValidationStatus>,
+): Pair<String, Boolean>? {
+    fun active(raw: List<String>) = VkHashValidationCodec.active(raw, invalidHashes).joinToString(",")
+    if (linkHashes.isNotEmpty()) {
+        val selected = active(linkHashes)
+        return selected.takeIf(String::isNotEmpty)?.let { it to true }
+    }
+    val selected = active(savedHashes.split(Regex("[,\\s\\n]+")))
+    return selected to false
+}
+
 suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
     val invalidHashes = VkHashValidationCodec.decode(store.vkHashCheckResults.first())
     fun activeHashes(raw: String): String = VkHashValidationCodec.active(
@@ -23,12 +37,13 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
 
     if (store.csqttLinkMode.first()) {
         val link = parseCsqttLink(store.csqttLink.first()) ?: return null
-        val linkHashes = activeHashes(link.hashes.joinToString(","))
+        val selectedHashes = selectConnectionHashes(link.hashes, store.vkHashes.first(), invalidHashes)
+            ?: return null
         return ConnectionSource(
             peer = link.peerAddress(),
             password = link.password,
-            hashes = linkHashes.ifEmpty { store.vkHashes.first() },
-            hashesFromLink = linkHashes.isNotEmpty(),
+            hashes = selectedHashes.first,
+            hashesFromLink = selectedHashes.second,
         )
     }
 

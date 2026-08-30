@@ -906,10 +906,7 @@ object TunnelManager {
             "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
             "-tun-uds", "csqtt_tun_uds",
         )
-        if (hashList.isNotEmpty()) {
-            cmd.add("-vk")
-            cmd.add(hashList.joinToString(","))
-        }
+        cmd.add("--credentials-stdin")
         cmd.add("-vk-hash-mode")
         cmd.add(params.vkHashMode)
         if (params.allowHashRedistribution || jsHashMode) {
@@ -931,8 +928,6 @@ object TunnelManager {
         cmd.add(params.vkAuthMode)
         cmd.add("-device-id")
         cmd.add(readDeviceId(context))
-        cmd.add("-password")
-        cmd.add(params.connectionPassword)
         if (params.generationId > 0) {
             cmd.add("-gen")
             cmd.add(params.generationId.toString())
@@ -959,28 +954,33 @@ object TunnelManager {
             failStartLocked("critical_start_error", "Критическая ошибка запуска: ${e.readableMessage()}")
             return
         }
-        if (jsHashMode) {
-            val bootstrap = JSONObject()
-                .put("token", params.vkAccessToken)
-                .toString()
-            val encoded = Base64.encodeToString(
-                bootstrap.toByteArray(Charsets.UTF_8),
-                Base64.NO_WRAP,
-            )
-            try {
-                startedProcess.outputStream.write(
-                    "VK_JS_BOOTSTRAP:$encoded\n".toByteArray(Charsets.UTF_8),
+        try {
+            val credentials = JSONObject()
+                .put("password", params.connectionPassword)
+                .put("vk", hashList.joinToString(","))
+            val stdin = StringBuilder("CSQTT_CREDENTIALS|")
+                .append(credentials)
+                .append('\n')
+            if (jsHashMode) {
+                val bootstrap = JSONObject()
+                    .put("token", params.vkAccessToken)
+                    .toString()
+                val encoded = Base64.encodeToString(
+                    bootstrap.toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP,
                 )
-                startedProcess.outputStream.flush()
-            } catch (e: Exception) {
-                startedProcess.destroy()
-                lifecycleState.releaseReservation(ticket)
-                failStartLocked(
-                    "vk_js_bootstrap_error",
-                    "Ошибка передачи данных Auto JS: ${e.readableMessage()}",
-                )
-                return
+                stdin.append("VK_JS_BOOTSTRAP:").append(encoded).append('\n')
             }
+            startedProcess.outputStream.write(stdin.toString().toByteArray(Charsets.UTF_8))
+                startedProcess.outputStream.flush()
+        } catch (e: Exception) {
+            startedProcess.destroy()
+            lifecycleState.releaseReservation(ticket)
+            failStartLocked(
+                "credentials_stdin_error",
+                "Ошибка безопасной передачи данных: ${e.readableMessage()}",
+            )
+            return
         }
         processGeneration = if (processGeneration == Long.MAX_VALUE) 1L else processGeneration + 1L
         val identity = ProcessIdentity(
