@@ -94,6 +94,16 @@ object CsqttConstants {
 			"https://github.com/danusha2345/csqtt-android/tree/"
     }
 
+    object ConfigSync {
+        const val INTERVAL_MS = 6L * 60L * 60L * 1000L
+    }
+
+    object Proxy {
+        const val MODE_VPN = "vpn"
+        const val MODE_SOCKS5 = "socks5"
+        const val DEFAULT_SOCKS5_PORT = 1080
+    }
+
     object Notifications {
         const val TUNNEL_CHANNEL_ID = "csqtt_tunnel_v4"
         const val TUNNEL_NOTIFICATION_ID = 1

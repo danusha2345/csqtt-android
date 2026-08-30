@@ -76,6 +76,7 @@ class TunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var updateJob: Job? = null
+    private var configSyncJob: Job? = null
     private var lastNotificationText: String? = null
     private var lastNotificationPostElapsedMs = 0L
     private var isStopping = false
@@ -154,18 +155,67 @@ class TunnelService : Service() {
                         val maxWorkers = WorkerCountPolicy.defaultMaximum(isExtra)
                         val workersPerHash = WorkerCountPolicy.normalize(requestedWorkers, maximum = maxWorkers)
                         TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
-                        val intentHashes = intent.getStringExtra("vk_hashes") ?: ""
-                        val hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)
+                        var effectivePeer = intent.getStringExtra("peer") ?: ""
+                        var effectiveHashes = intent.getStringExtra("vk_hashes") ?: ""
+                        var hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)
+                        val connectionPassword = intent.getStringExtra("connection_password") ?: ""
                         if (accountAutoJs) {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_AUTO_JS)
                         }
                         if (!awaitVkNetwork()) return@launch
+                        val syncState = store.configSyncState()
+                        if (syncState.enabled && effectivePeer.isNotBlank() && connectionPassword.isNotBlank()) {
+                            val webPort = intent.getIntExtra("config_web_port", store.serverWebPort.first())
+                            ConfigSyncClient.fetch(effectivePeer, connectionPassword, webPort)
+                                .onSuccess { remote ->
+                                    if (!remote.active) {
+                                        TunnelManager.updateLog(
+                                            "config_sync_inactive",
+                                            "Сервер отключил эту конфигурацию",
+                                            99,
+                                            true,
+                                        )
+                                        launch(Dispatchers.Main) { stopTunnel() }
+                                        return@launch
+                                    }
+                                    effectivePeer = ConfigSyncClient.withPeerPort(effectivePeer, remote.peerPort)
+                                        ?: effectivePeer
+                                    if (remote.vkHashes.isNotEmpty()) {
+                                        effectiveHashes = remote.vkHashes
+                                        hashesFromLink = false
+                                    }
+                                    store.saveSyncedConfig(
+                                        revision = remote.revision,
+                                        vkHashes = remote.vkHashes,
+                                        peerPort = remote.peerPort,
+                                        checkedAt = System.currentTimeMillis(),
+                                    )
+                                    TunnelManager.updateLog(
+                                        "config_sync_ok",
+                                        if (remote.revision == syncState.revision) {
+                                            "Конфигурация сервера актуальна"
+                                        } else {
+                                            "Конфигурация и VK-хеши обновлены"
+                                        },
+                                        34,
+                                        false,
+                                    )
+                                }
+                                .onFailure { error ->
+                                    TunnelManager.updateLog(
+                                        "config_sync_warning",
+                                        "Безопасное обновление недоступно: ${error.message ?: error.javaClass.simpleName}",
+                                        62,
+                                        false,
+                                    )
+                                }
+                        }
                         val resolvedHashes = if (hashesFromLink && !accountAutoJs) {
-                            ResolvedVkHashes(intentHashes, false)
+                            ResolvedVkHashes(effectiveHashes, false)
                         } else {
                             resolveAutoHashes(
                                 store,
-                                intentHashes,
+                                effectiveHashes,
                                 workersPerHash,
                                 if (accountAutoJs) CsqttConstants.VkAutoHash.MODE_AUTO_JS else null,
                             )
@@ -182,13 +232,13 @@ class TunnelService : Service() {
                         }
 
                         val params = TunnelParams(
-                            peer = intent.getStringExtra("peer") ?: "",
+                            peer = effectivePeer,
                             vkHashes = resolvedHashes.value,
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash") ?: "",
                             workersPerHash = workersPerHash,
                             port = intent.getIntExtra("port", 0),
                             sni = intent.getStringExtra("sni") ?: "",
-                            connectionPassword = intent.getStringExtra("connection_password") ?: "",
+                            connectionPassword = connectionPassword,
                             protocol = intent.getStringExtra("protocol") ?: "udp",
                             vkAuthMode = vkAuthMode,
                             captchaMode = sanitizeCaptchaMode(intent.getStringExtra("captcha_mode")),
@@ -207,6 +257,8 @@ class TunnelService : Service() {
                             allowHashRedistribution = resolvedHashes.allowWorkerRedistribution,
                             vkHashMode = resolvedHashes.mode,
                             vkAccessToken = resolvedHashes.accessToken,
+                            proxyMode = store.proxyMode.first(),
+                            proxyPort = store.proxyPort.first(),
                         )
                         launch(Dispatchers.Main) {
                             startTunnel(params)
@@ -317,7 +369,7 @@ class TunnelService : Service() {
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 if (reconcileWifiAutoPause()) return@launch
 
-                val source = resolveConnectionSource(store)
+                var source = resolveConnectionSource(store)
                 val genId = store.reserveConnectionGeneration()
                 val salt = java.util.UUID.randomUUID().toString().replace("-", "")
                 val vkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
@@ -325,6 +377,29 @@ class TunnelService : Service() {
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
                 if (!awaitVkNetwork()) return@launch
+                val syncState = store.configSyncState()
+                val sourceBeforeSync = source
+                if (syncState.enabled && sourceBeforeSync != null) {
+                    ConfigSyncClient.fetch(sourceBeforeSync.peer, sourceBeforeSync.password, sourceBeforeSync.webPort)
+                        .onSuccess { remote ->
+                            if (!remote.active) {
+                                launch(Dispatchers.Main) { stopTunnel() }
+                                return@launch
+                            }
+                            source = sourceBeforeSync.copy(
+                                peer = ConfigSyncClient.withPeerPort(sourceBeforeSync.peer, remote.peerPort)
+                                    ?: sourceBeforeSync.peer,
+                                hashes = remote.vkHashes.ifEmpty { sourceBeforeSync.hashes },
+                                hashesFromLink = remote.vkHashes.isEmpty() && sourceBeforeSync.hashesFromLink,
+                            )
+                            store.saveSyncedConfig(
+                                remote.revision,
+                                remote.vkHashes,
+                                remote.peerPort,
+                                System.currentTimeMillis(),
+                            )
+                        }
+                }
                 val restoredHashes = when {
                     source == null -> null
                     source.hashesFromLink && !accountAutoJs -> ResolvedVkHashes(source.hashes, false)
@@ -355,6 +430,8 @@ class TunnelService : Service() {
                     allowHashRedistribution = restoredHashes?.allowWorkerRedistribution == true,
                     vkHashMode = restoredHashes?.mode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
                     vkAccessToken = restoredHashes?.accessToken.orEmpty(),
+                    proxyMode = store.proxyMode.first(),
+                    proxyPort = store.proxyPort.first(),
                 )
                 if (
                     params.peer.isNotEmpty() &&
@@ -521,7 +598,81 @@ class TunnelService : Service() {
         TunnelManager.scope.launch(Dispatchers.Main) {
             VkAutoCallsManager.replayPendingLogs()
         }
+        scheduleConfigSync()
         startStatsUpdater()
+    }
+
+    private fun scheduleConfigSync() {
+        configSyncJob?.cancel()
+        configSyncJob = serviceScope.launch {
+            while (isActive) {
+                delay(CsqttConstants.ConfigSync.INTERVAL_MS)
+                val current = TunnelManager.getCurrentParams() ?: continue
+                val store = SettingsStore(applicationContext)
+                val previous = store.configSyncState()
+                if (!previous.enabled) continue
+                val webPort = ConfigSyncClient.peerHost(current.peer)?.let { previousWebHost ->
+                    val source = resolveConnectionSource(store)
+                    source?.webPort?.takeIf { ConfigSyncClient.peerHost(source.peer) == previousWebHost }
+                } ?: store.serverWebPort.first()
+                ConfigSyncClient.fetch(current.peer, current.connectionPassword, webPort)
+                    .onSuccess { remote ->
+                        if (!remote.active) {
+                            TunnelManager.updateLog(
+                                "config_sync_inactive",
+                                "Сервер отключил эту конфигурацию",
+                                99,
+                                true,
+                            )
+                            launch(Dispatchers.Main) { stopTunnel() }
+                            return@onSuccess
+                        }
+                        store.saveSyncedConfig(
+                            revision = remote.revision,
+                            vkHashes = remote.vkHashes,
+                            peerPort = remote.peerPort,
+                            checkedAt = System.currentTimeMillis(),
+                        )
+                        if (remote.revision == previous.revision) return@onSuccess
+                        val nextPeer = ConfigSyncClient.withPeerPort(current.peer, remote.peerPort)
+                            ?: current.peer
+                        val nextHashes = if (
+                            current.vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL &&
+                            remote.vkHashes.isNotEmpty()
+                        ) {
+                            remote.vkHashes
+                        } else {
+                            current.vkHashes
+                        }
+                        val nextGeneration = store.reserveConnectionGeneration(
+                            if (current.generationId == Long.MAX_VALUE) Long.MAX_VALUE else current.generationId + 1,
+                        )
+                        val next = current.copy(
+                            peer = nextPeer,
+                            vkHashes = nextHashes,
+                            generationId = nextGeneration,
+                            sessionSalt = java.util.UUID.randomUUID().toString().replace("-", ""),
+                        )
+                        TunnelManager.updateLog(
+                            "config_sync_changed",
+                            "Конфигурация сервера изменилась · переподключение",
+                            40,
+                            false,
+                        )
+                        launch(Dispatchers.Main) {
+                            TunnelManager.start(applicationContext, next, isSwitching = true)
+                        }
+                    }
+                    .onFailure { error ->
+                        TunnelManager.updateLog(
+                            "config_sync_periodic_error",
+                            "Обновление конфигурации отложено: ${error.message ?: error.javaClass.simpleName}",
+                            58,
+                            false,
+                        )
+                    }
+            }
+        }
     }
 
     private fun registerPhysicalNetworkCallback() {
@@ -816,6 +967,8 @@ class TunnelService : Service() {
         TunnelManager.leaveWifiAutoPause()
         TunnelManager.starting.value = false
         updateJob?.cancel()
+        configSyncJob?.cancel()
+        configSyncJob = null
         // Сохраняем: пользователь явно остановил CSQTT — авторестарт при холодном старте запрещён
         serviceScope.launch {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(false) }

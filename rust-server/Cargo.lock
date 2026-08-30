@@ -453,6 +453,7 @@ dependencies = [
  "dashmap",
  "hex",
  "hkdf",
+ "hmac",
  "libc",
  "rand",
  "rcgen",

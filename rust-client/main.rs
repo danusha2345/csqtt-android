@@ -22,6 +22,7 @@ mod repair;
 mod selective_fec;
 mod session;
 mod stats;
+mod stream_proxy;
 #[path = "../shared/striped_scheduler.rs"]
 mod striped_scheduler;
 mod stun_codec;
@@ -112,6 +113,8 @@ struct Arguments {
     salt: String,
     #[arg(long, default_value = "")]
     tun_uds: String,
+    #[arg(long, default_value = "")]
+    socks5: String,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
     #[arg(long, default_value_t = false)]
@@ -250,6 +253,9 @@ async fn run(arguments: Arguments) -> Result<()> {
     let parent_task = start_parent_monitor(cancel.clone());
     events.process(std::process::id());
     let pool = PacketPool::new(packet_pool_size(workers));
+    if !arguments.socks5.is_empty() && !arguments.tun_uds.is_empty() {
+        bail!("--socks5 and --tun-uds are mutually exclusive");
+    }
     let tun_uds = (!arguments.tun_uds.is_empty()).then_some(arguments.tun_uds.clone());
     let dispatcher_result = Dispatcher::start(
         &arguments.listen,
@@ -267,6 +273,19 @@ async fn run(arguments: Arguments) -> Result<()> {
             }
             return Err(error);
         }
+    };
+    let proxy_task = if arguments.socks5.is_empty() {
+        None
+    } else {
+        let (address, task) = stream_proxy::start(
+            &arguments.socks5,
+            dispatcher.clone(),
+            pool.clone(),
+            cancel.clone(),
+        )
+        .await?;
+        crate::log_error!("[SOCKS5] Локальный прокси: {address} · CONNECT через CSQTT");
+        Some(task)
     };
     let local_port: Arc<str> = Arc::from(local_port);
     let params = Arc::new(RuntimeParams {
@@ -369,6 +388,9 @@ async fn run(arguments: Arguments) -> Result<()> {
         groups_future.await;
     }
     dispatcher.shutdown().await;
+    if let Some(task) = proxy_task {
+        let _ = task.await;
+    }
     stats_task.abort();
     config_task.abort();
     control_task.abort();
@@ -479,6 +501,7 @@ fn normalize_cli_argument(argument: String) -> String {
         "gen",
         "salt",
         "tun-uds",
+        "socks5",
         "allow-hash-redistribution",
         "validate-vk-hashes",
         "credentials-stdin",

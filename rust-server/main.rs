@@ -34,6 +34,7 @@ mod protocol;
 mod proxy_route;
 #[path = "../shared/selective_fec.rs"]
 mod selective_fec;
+mod stream_proxy;
 #[path = "../shared/striped_scheduler.rs"]
 mod striped_scheduler;
 mod tokio_io;
@@ -205,6 +206,7 @@ pub struct App {
     pub secure_cookie: bool,
     pub fec_profile: protocol::FecProfile,
     pub sessions: DashMap<u64, Arc<Session>>,
+    pub proxy_streams: DashMap<(u64, u64), tokio::sync::mpsc::Sender<stream_proxy::StreamInput>>,
     pub device_epochs: DashMap<String, Arc<protocol::DeviceEpochSlot>>,
     pub web_sessions: DashMap<String, i64>,
     pub login_limits: DashMap<String, (u32, i64)>,
@@ -2027,6 +2029,7 @@ async fn async_main() -> Result<()> {
         secure_cookie: args.secure_cookie,
         fec_profile: args.fec,
         sessions: DashMap::new(),
+        proxy_streams: DashMap::new(),
         device_epochs: DashMap::new(),
         web_sessions,
         login_limits: DashMap::new(),

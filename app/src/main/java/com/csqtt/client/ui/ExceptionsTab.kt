@@ -55,6 +55,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.csqtt.client.CsqttConstants
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
@@ -92,6 +94,7 @@ fun ExceptionsTab(
     val context = LocalContext.current.applicationContext
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
+    val proxyMode by settingsStore.proxyMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Proxy.MODE_VPN)
     // Taps edit a local draft; the DataStore write (and VPN reload) is
     // debounced so a burst of toggles costs one persist instead of one per tap.
     val persistedSelection = remember(savedExcluded) {
@@ -198,6 +201,17 @@ fun ExceptionsTab(
     }
 
     CsqttScreen {
+        if (proxyMode == CsqttConstants.Proxy.MODE_SOCKS5) {
+            AppSectionCard(
+                contentPadding = PaddingValues(CsqttSpacing.Md),
+            ) {
+                Text(
+                    text = "В режиме SOCKS5 этот список не используется: укажите локальный прокси в нужном приложении.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },

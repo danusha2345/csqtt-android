@@ -1869,7 +1869,7 @@ pub async fn compact_memory(app: &Arc<App>) -> Result<bool> {
         .map_err(|_| anyhow!("dataplane stopped before memory compaction"))
 }
 
-fn command(app: &Arc<App>, command_value: ProtocolCommand) -> Result<()> {
+pub(crate) fn command(app: &Arc<App>, command_value: ProtocolCommand) -> Result<()> {
     app.dataplane
         .get()
         .ok_or_else(|| anyhow!("dataplane is not initialized"))?
@@ -3730,6 +3730,7 @@ fn is_control_payload(payload: &[u8]) -> bool {
         || payload.starts_with(b"DISCONNECT:")
         || payload == b"READY"
         || payload.first().is_some_and(|byte| *byte == 0xff)
+        || crate::stream_proxy::is_frame(payload)
 }
 
 #[inline(always)]
@@ -3749,6 +3750,7 @@ fn should_flush_udp_immediately(payload: &[u8]) -> bool {
         || payload == b"READY"
         || payload == b"READY_OK"
         || payload == PANEL_RESTART_NOTICE
+        || crate::stream_proxy::is_frame(payload)
 }
 
 fn session_is_retired_by_epoch(
@@ -3855,6 +3857,7 @@ async fn control_loop(app: Arc<App>, mut receiver: mpsc::Receiver<ControlEvent>)
                 session_id,
                 reason,
             } => {
+                crate::stream_proxy::close_session(&app, session_id);
                 if let Some((_, session)) = app
                     .sessions
                     .remove_if(&session_id, |_, current| current.id == session_id)
@@ -4022,6 +4025,12 @@ async fn process_control_payload(
         app,
         session_id: session.id,
     };
+    if crate::stream_proxy::is_frame(payload) {
+        if !session.has_tunnel.load(Ordering::Acquire) {
+            bail!("proxy requested before authenticated tunnel");
+        }
+        return crate::stream_proxy::handle_frame(app, session.id, payload).await;
+    }
     if payload.starts_with(b"GETCONF:") {
         let text = std::str::from_utf8(payload)?;
         return handle_getconf(app, &writer, session, text).await;
@@ -5176,6 +5185,7 @@ mod tests {
     #[test]
     fn session_lease_is_control() {
         assert!(is_control_payload(SESSION_LEASE));
+        assert!(is_control_payload(b"CSQPX1\x01\0\0\0\0\0\0\0\x01"));
     }
 
     #[test]
@@ -5183,6 +5193,7 @@ mod tests {
         assert!(should_flush_udp_immediately(b"GETCONF:9000|device"));
         assert!(should_flush_udp_immediately(STREAM_REPAIR_PREFIX));
         assert!(should_flush_udp_immediately(b"READY"));
+        assert!(should_flush_udp_immediately(b"CSQPX1\x04\0\0\0\0\0\0\0\x01data"));
         assert!(!should_flush_udp_immediately(&[0x45, 0, 0, 28]));
     }
 

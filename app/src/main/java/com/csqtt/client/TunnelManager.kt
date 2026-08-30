@@ -353,11 +353,24 @@ object TunnelManager {
                     activeScope.launch(Dispatchers.Main) {
                         if (!isCurrent(identity)) return@launch
                         if (configStr.startsWith("TUNCONF:")) {
-                            ensureVpnStarted(
-                                configStr,
-                                identity,
-                                forceRebuild = vpnRebuildAfterPanelRestart.getAndSet(false),
-                            )
+                            if (currentParams?.proxyMode == CsqttConstants.Proxy.MODE_SOCKS5) {
+                                vpnRebuildAfterPanelRestart.set(false)
+                                vpnReady.value = true
+                                updateProcessLog(
+                                    identity,
+                                    "socks5_ready",
+                                    "[SOCKS5] Прокси готов на 127.0.0.1:${currentParams?.proxyPort}",
+                                    22,
+                                    false,
+                                    LogLevel.OK,
+                                )
+                            } else {
+                                ensureVpnStarted(
+                                    configStr,
+                                    identity,
+                                    forceRebuild = vpnRebuildAfterPanelRestart.getAndSet(false),
+                                )
+                            }
                         } else {
                             updateProcessLog(identity, "vpn_config_err", "Получен неизвестный формат конфига", 99, true)
                         }
@@ -904,8 +917,8 @@ object TunnelManager {
             "-peer", params.peer,
             "-n", totalWorkers.toString(),
             "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
-            "-tun-uds", "csqtt_tun_uds",
         )
+        cmd.addAll(proxyRuntimeArgs(params.proxyMode, params.proxyPort))
         cmd.add("--credentials-stdin")
         cmd.add("-vk-hash-mode")
         cmd.add(params.vkHashMode)
@@ -1518,6 +1531,7 @@ object TunnelManager {
     }
 
     fun reloadVpn() {
+        if (currentParams?.proxyMode == CsqttConstants.Proxy.MODE_SOCKS5) return
         val configStr = config.value?.trim() ?: return
         if (running.value && configStr.startsWith("TUNCONF:")) {
             activeScope.launch(Dispatchers.Main) {
@@ -1700,4 +1714,6 @@ data class TunnelParams(
     val allowHashRedistribution: Boolean = false,
     val vkHashMode: String = CsqttConstants.VkAutoHash.MODE_MANUAL,
     val vkAccessToken: String = "",
+    val proxyMode: String = CsqttConstants.Proxy.MODE_VPN,
+    val proxyPort: Int = CsqttConstants.Proxy.DEFAULT_SOCKS5_PORT,
 )

@@ -12,6 +12,7 @@ data class ConnectionSource(
     val password: String,
     val hashes: String,
     val hashesFromLink: Boolean,
+    val webPort: Int,
 )
 
 internal fun selectConnectionHashes(
@@ -44,6 +45,7 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
             password = link.password,
             hashes = selectedHashes.first,
             hashesFromLink = selectedHashes.second,
+            webPort = link.webPort,
         )
     }
 
@@ -61,5 +63,6 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
         password = password,
         hashes = activeHashes(store.vkHashes.first()),
         hashesFromLink = false,
+        webPort = store.serverWebPort.first(),
     )
 }

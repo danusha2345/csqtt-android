@@ -8,6 +8,7 @@ data class CsqttLink(
     val port: Int,
     val password: String,
     val hashes: List<String> = emptyList(),
+    val webPort: Int = com.csqtt.client.CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT,
 )
 
 fun parseCsqttLink(raw: String): CsqttLink? {
@@ -40,7 +41,12 @@ private fun parseCsqttV2(uri: java.net.URI): CsqttLink? {
     if (host.any(Char::isWhitespace) || password.any(Char::isWhitespace)) return null
     val hashes = parameters["hashes"]?.let(::parseLinkHashes) ?: emptyList()
     if (parameters.containsKey("hashes") && hashes.isEmpty()) return null
-    return CsqttLink(host, port, password, hashes)
+    val webPort = parameters["web"]
+        ?.let(::decodeQueryComponent)
+        ?.toIntOrNull()
+        ?.takeIf { it in 1..65535 }
+        ?: com.csqtt.client.CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
+    return CsqttLink(host, port, password, hashes, webPort)
 }
 
 private fun parseRawQuery(rawQuery: String): Map<String, String>? {
@@ -63,7 +69,7 @@ private fun parseRawQuery(rawQuery: String): Map<String, String>? {
         }
     }
 
-    val pattern = Regex("(?:^|[&;]|(?<=[a-zA-Z0-9_]))(v|host|peer|password|hashes)=([^&?]*?)(?=(?:v|host|peer|password|hashes)=|$)", RegexOption.IGNORE_CASE)
+    val pattern = Regex("(?:^|[&;]|(?<=[a-zA-Z0-9_]))(v|host|peer|web|password|hashes)=([^&?]*?)(?=(?:v|host|peer|web|password|hashes)=|$)", RegexOption.IGNORE_CASE)
     val matches = pattern.findAll(sanitized).toList()
     if (matches.isNotEmpty()) {
         val extracted = linkedMapOf<String, String>()

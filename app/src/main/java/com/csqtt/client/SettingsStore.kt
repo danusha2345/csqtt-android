@@ -58,6 +58,14 @@ internal data class TunnelAuthSnapshot(
         get() = profile >= 0
 }
 
+internal data class ConfigSyncState(
+    val enabled: Boolean = true,
+    val lastCheckedAt: Long = 0L,
+    val revision: String = "",
+    val vkHashes: String = "",
+    val peerPort: Int = 0,
+)
+
 class SettingsStore(context: Context) {
     private val appContext = context.applicationContext
     companion object {
@@ -69,6 +77,11 @@ class SettingsStore(context: Context) {
         private val CSQTT_LINK_ENCRYPTED = stringPreferencesKey("csqtt_link_encrypted")
         private val CSQTT_LINK_MODE = booleanPreferencesKey("csqtt_link_mode")
         private val ACTIVE_VK_CALL_SESSION_ENCRYPTED = stringPreferencesKey("active_vk_call_session_encrypted")
+        private val CONFIG_SYNC_ENABLED = booleanPreferencesKey("config_sync_enabled")
+        private val CONFIG_SYNC_LAST_CHECKED_AT = longPreferencesKey("config_sync_last_checked_at")
+        private val CONFIG_SYNC_REVISION = stringPreferencesKey("config_sync_revision")
+        private val CONFIG_SYNC_VK_HASHES = stringPreferencesKey("config_sync_vk_hashes")
+        private val CONFIG_SYNC_PEER_PORT = intPreferencesKey("config_sync_peer_port")
 
         private val PEER = stringPreferencesKey("peer")
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
@@ -192,10 +205,10 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_WEB_LOGIN, DEPLOY_WEB_PASSWORD, DEPLOY_WEB_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, CSQTT_LINK_ENCRYPTED, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_ENCRYPTED, SSH_KEY_PASSPHRASE, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_CERTIFICATE, SSH_CERTIFICATE_ENCRYPTED, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS -> stringPreferencesKey(newName) as Preferences.Key<T>
-                WORKERS_PER_HASH, LISTEN_PORT, SERVER_PEER_PORT, PROXY_PORT, SERVER_WEB_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
-                MANUAL_PORTS_ENABLED, NO_DNS, IS_WHITELIST, CSQTT_LINK_MODE, DETAILED_LOGS, SSH_KEYS_MODE, DOCKER_INSTALL, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
-                CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_WEB_LOGIN, DEPLOY_WEB_PASSWORD, DEPLOY_WEB_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, CSQTT_LINK_ENCRYPTED, CONFIG_SYNC_REVISION, CONFIG_SYNC_VK_HASHES, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_ENCRYPTED, SSH_KEY_PASSPHRASE, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_CERTIFICATE, SSH_CERTIFICATE_ENCRYPTED, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                WORKERS_PER_HASH, LISTEN_PORT, SERVER_PEER_PORT, PROXY_PORT, SERVER_WEB_PORT, CONFIG_SYNC_PEER_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
+                MANUAL_PORTS_ENABLED, NO_DNS, IS_WHITELIST, CSQTT_LINK_MODE, CONFIG_SYNC_ENABLED, DETAILED_LOGS, SSH_KEYS_MODE, DOCKER_INSTALL, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
+                CONNECTION_GENERATION, CONFIG_SYNC_LAST_CHECKED_AT -> longPreferencesKey(newName) as Preferences.Key<T>
                 else -> stringPreferencesKey(newName) as Preferences.Key<T>
             }
         }
@@ -241,6 +254,10 @@ class SettingsStore(context: Context) {
     val csqttLinkMode: Flow<Boolean> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false
+    }
+    val configSyncEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(CONFIG_SYNC_ENABLED, profile)] ?: true
     }
 
     val peer: Flow<String> = dataStore.data.map { prefs ->
@@ -370,6 +387,18 @@ class SettingsStore(context: Context) {
     val serverWebPort: Flow<Int> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(SERVER_WEB_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
+    }
+    val proxyMode: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(PROXY_MODE, profile)]
+            ?.takeIf { it == CsqttConstants.Proxy.MODE_SOCKS5 }
+            ?: CsqttConstants.Proxy.MODE_VPN
+    }
+    val proxyPort: Flow<Int> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        (prefs[getProfileKey(PROXY_PORT, profile)] ?: CsqttConstants.Proxy.DEFAULT_SOCKS5_PORT)
+            .takeIf { it in 1..65535 }
+            ?: CsqttConstants.Proxy.DEFAULT_SOCKS5_PORT
     }
 
     val vkAuthMode: Flow<String> = dataStore.data.map { prefs ->
@@ -659,6 +688,55 @@ class SettingsStore(context: Context) {
 
     suspend fun clearActiveVkCallSession() {
         dataStore.edit { it.remove(ACTIVE_VK_CALL_SESSION_ENCRYPTED) }
+    }
+
+    internal suspend fun configSyncState(): ConfigSyncState {
+        val prefs = dataStore.data.first()
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        return ConfigSyncState(
+            enabled = prefs[getProfileKey(CONFIG_SYNC_ENABLED, profile)] ?: true,
+            lastCheckedAt = prefs[getProfileKey(CONFIG_SYNC_LAST_CHECKED_AT, profile)] ?: 0L,
+            revision = prefs[getProfileKey(CONFIG_SYNC_REVISION, profile)] ?: "",
+            vkHashes = prefs[getProfileKey(CONFIG_SYNC_VK_HASHES, profile)] ?: "",
+            peerPort = prefs[getProfileKey(CONFIG_SYNC_PEER_PORT, profile)] ?: 0,
+        )
+    }
+
+    suspend fun saveConfigSyncEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(CONFIG_SYNC_ENABLED, profile)] = enabled
+        }
+    }
+
+    suspend fun saveProxyMode(mode: String) {
+        val normalized = if (mode == CsqttConstants.Proxy.MODE_SOCKS5) {
+            CsqttConstants.Proxy.MODE_SOCKS5
+        } else {
+            CsqttConstants.Proxy.MODE_VPN
+        }
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(PROXY_MODE, profile)] = normalized
+        }
+    }
+
+    suspend fun saveProxyPort(port: Int) {
+        if (port !in 1..65535) return
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(PROXY_PORT, profile)] = port
+        }
+    }
+
+    suspend fun saveSyncedConfig(revision: String, vkHashes: String, peerPort: Int, checkedAt: Long) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(CONFIG_SYNC_REVISION, profile)] = revision
+            prefs[getProfileKey(CONFIG_SYNC_VK_HASHES, profile)] = vkHashes
+            prefs[getProfileKey(CONFIG_SYNC_PEER_PORT, profile)] = peerPort
+            prefs[getProfileKey(CONFIG_SYNC_LAST_CHECKED_AT, profile)] = checkedAt
+        }
     }
 
     suspend fun saveWorkersPerHash(workersPerHash: Int) {

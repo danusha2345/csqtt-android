@@ -41,6 +41,13 @@ class CsqttLinkTest {
     }
 
     @Test
+    fun parsesExplicitWebPortForConfigSync() {
+        val link = parseCsqttLink("csqtt://connect?v=2&host=vps.example&peer=46010&web=46002&password=secret")
+        requireNotNull(link)
+        assertEquals(46002, link.webPort)
+    }
+
+    @Test
     fun preservesEncodedPlusInsideHash() {
         val link = parseCsqttLink(
             "csqtt://connect?v=2&host=vps.example&peer=46000&password=secret&hashes=abcdefghijklmno%2Bp",

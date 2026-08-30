@@ -8,16 +8,17 @@ use crate::{
     striped_scheduler::{DispatchTicket, PacketClass, StripedScheduler, packet_class},
     tun, udp_batch,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_queue::ArrayQueue;
 use socket2::SockRef;
 use std::{
+    collections::HashMap,
     fs::File,
     future::Future,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -267,6 +268,8 @@ pub struct Dispatcher {
     scheduler: StripedScheduler,
     cancel: CancellationToken,
     tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    proxy_frames: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    proxy_routes: Mutex<HashMap<u64, (usize, u64)>>,
 }
 
 impl Dispatcher {
@@ -291,6 +294,8 @@ impl Dispatcher {
             scheduler: StripedScheduler::new(),
             cancel: cancel.clone(),
             tasks: tokio::sync::Mutex::new(Vec::new()),
+            proxy_frames: OnceLock::new(),
+            proxy_routes: Mutex::new(HashMap::new()),
         });
         if let Some(name) = tun_uds {
             crate::log_error!("[КЛИЕНТ] Запуск UDS-слушателя: {name} для получения TUN FD...");
@@ -391,6 +396,10 @@ impl Dispatcher {
             interleave_turn_paths(&mut updated);
             Arc::new(updated)
         });
+        self.proxy_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, route| *route != (id, incarnation_id));
     }
 
     #[cfg(test)]
@@ -408,6 +417,12 @@ impl Dispatcher {
     }
 
     pub fn return_packet(&self, packet: PacketBuf) {
+        if crate::stream_proxy::is_frame(packet.as_slice()) {
+            if let Some(sender) = self.proxy_frames.get() {
+                let _ = sender.try_send(packet.as_slice().to_vec());
+            }
+            return;
+        }
         client_perf::measure_sampled(PerfStage::ReaderReturn, 64, || {
             let sender = match packet_class(packet.as_slice()) {
                 PacketClass::Latency => &self.return_latency_tx,
@@ -416,6 +431,49 @@ impl Dispatcher {
             };
             let _ = sender.force_send(packet);
         });
+    }
+
+    pub fn set_proxy_frame_sender(&self, sender: tokio::sync::mpsc::Sender<Vec<u8>>) -> Result<()> {
+        self.proxy_frames
+            .set(sender)
+            .map_err(|_| anyhow::anyhow!("SOCKS5 frame receiver already configured"))
+    }
+
+    pub fn send_proxy_frame(&self, pool: &Arc<PacketPool>, frame: &[u8]) -> Result<()> {
+        let (kind, stream_id) = crate::stream_proxy::frame_route(frame)
+            .ok_or_else(|| anyhow::anyhow!("invalid SOCKS5 frame"))?;
+        let workers = self.workers.load();
+        let mut routes = self
+            .proxy_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let route = if kind == crate::stream_proxy::OPEN {
+            let worker = workers.first().ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
+            routes.insert(stream_id, (worker.id, worker.incarnation_id));
+            (worker.id, worker.incarnation_id)
+        } else {
+            routes.get(&stream_id).copied().ok_or_else(|| anyhow::anyhow!("SOCKS5 carrier is unavailable"))?
+        };
+        let Some(worker) = workers
+            .iter()
+            .find(|worker| (worker.id, worker.incarnation_id) == route)
+        else {
+            routes.remove(&stream_id);
+            bail!("SOCKS5 carrier was replaced");
+        };
+        let Some(mut packet) = pool.try_acquire() else {
+            bail!("packet pool exhausted");
+        };
+        packet.set_read_len(frame.len())?;
+        packet.as_mut_slice().copy_from_slice(frame);
+        let result = worker
+            .priority
+            .force_send(packet)
+            .map_err(|_| anyhow::anyhow!("CSQTT transport queue is unavailable"));
+        if kind == crate::stream_proxy::CLOSE || result.is_err() {
+            routes.remove(&stream_id);
+        }
+        result
     }
 
     pub async fn shutdown(&self) {
@@ -1033,6 +1091,8 @@ mod tests {
                 scheduler: StripedScheduler::new(),
                 cancel: CancellationToken::new(),
                 tasks: tokio::sync::Mutex::new(Vec::new()),
+                proxy_frames: OnceLock::new(),
+                proxy_routes: Mutex::new(HashMap::new()),
             }),
             return_latency_rx,
             return_priority_rx,

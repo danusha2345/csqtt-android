@@ -50,14 +50,14 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     return
                 }
 
-                if (VpnService.prepare(context) != null) {
-                    context.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
-                    openMainActivity(context)
-                    return
-                }
-
                 scope.launch {
                     try {
+                        val proxyMode = SettingsStore(context.applicationContext).proxyMode.first()
+                        if (requiresVpnPermission(proxyMode) && VpnService.prepare(context) != null) {
+                            context.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
+                            openMainActivity(context)
+                            return@launch
+                        }
                         val startIntent = buildStartIntent(context)
                         if (startIntent == null) {
                             context.showRaisedToast("Заполните настройки подключения в CSQTT", Toast.LENGTH_LONG)
@@ -85,6 +85,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 putExtra("peer", source.peer)
                 putExtra("vk_hashes", source.hashes)
                 putExtra("vk_hashes_from_link", source.hashesFromLink)
+                putExtra("config_web_port", source.webPort)
                 putExtra("secondary_vk_hash", store.secondaryVkHash.first())
                 putExtra("workers_per_hash", store.workersPerHash.first())
                 putExtra("port", 0)
