@@ -312,9 +312,10 @@ async fn client_config(
         Some(value) => value,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    if !timestamp.parse::<i64>().is_ok_and(|value| {
-        now().abs_diff(value) <= CONFIG_SYNC_MAX_CLOCK_SKEW_SECONDS as u64
-    }) {
+    if !timestamp
+        .parse::<i64>()
+        .is_ok_and(|value| now().abs_diff(value) <= CONFIG_SYNC_MAX_CLOCK_SKEW_SECONDS as u64)
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     let nonce_text = match headers

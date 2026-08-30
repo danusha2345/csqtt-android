@@ -448,11 +448,16 @@ impl Dispatcher {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let route = if kind == crate::stream_proxy::OPEN {
-            let worker = workers.first().ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
+            let worker = workers
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
             routes.insert(stream_id, (worker.id, worker.incarnation_id));
             (worker.id, worker.incarnation_id)
         } else {
-            routes.get(&stream_id).copied().ok_or_else(|| anyhow::anyhow!("SOCKS5 carrier is unavailable"))?
+            routes
+                .get(&stream_id)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("SOCKS5 carrier is unavailable"))?
         };
         let Some(worker) = workers
             .iter()
