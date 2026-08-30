@@ -1,0 +1,14 @@
+.gradle/
+.kotlin/
+build/
+**/build/
+**/target/
+app/release/
+dist/
+app/src/main/jniLibs/
+app/src/main/assets/csqtt
+app/src/main/libclient.provenance.json
+local.properties
+release.keystore
+*.jks
+*.keystore

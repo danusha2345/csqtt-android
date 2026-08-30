@@ -1,0 +1,20 @@
+// SPDX-FileCopyrightText: 2026 amurcanov
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+package com.csqtt.client
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class TunnelAuthSnapshotTest {
+    @Test
+    fun `default snapshot is a loading sentinel`() {
+        assertFalse(TunnelAuthSnapshot().isLoaded)
+    }
+
+    @Test
+    fun `profile snapshot is loaded even when password is genuinely empty`() {
+        assertTrue(TunnelAuthSnapshot(profile = 0, connectionPassword = "").isLoaded)
+    }
+}

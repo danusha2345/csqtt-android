@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 amurcanov -->
+<!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
+
+<lint>
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <issue id="UnsafeNativeCodeLocation">
+        <ignore path="src/main/assets/csqtt" />
+    </issue>
+</lint>

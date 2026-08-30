@@ -1,0 +1,7 @@
+# Local Android SDK and release-signing configuration.
+# Copy to local.properties and keep the real values outside Git.
+sdk.dir=/path/to/Android/Sdk
+KEYSTORE_FILE=/absolute/path/to/release.keystore
+KEYSTORE_PASSWORD=change-me
+KEY_ALIAS=release
+KEY_PASSWORD=change-me
