@@ -639,7 +639,7 @@ pub async fn run_session(
     mut runtime: SessionRuntime,
 ) -> Result<bool> {
     if credentials.server_addresses.is_empty() {
-        bail!("РЅРµС‚ TURN URL РІ СѓС‡РµС‚РЅС‹С… РґР°РЅРЅС‹С…");
+        bail!("нет TURN URL в учётных данных");
     }
     let turn_address = select_turn_address(&credentials.server_addresses, &config)?;
     let turn_path = turn_path_key(turn_address, &config)?;
@@ -677,11 +677,7 @@ pub async fn run_session(
     if let Some(ready) = runtime.allocation_ready.take() {
         let _ = ready.send(());
     }
-    crate::log_error!(
-        "[РЎР•РЎРЎР˜РЇ #{}] Relay: {}",
-        config.id,
-        allocation.local_addr()
-    );
+    crate::log_error!("[СЕССИЯ #{}] Relay: {}", config.id, allocation.local_addr());
     let channel = tokio::select! {
         biased;
         result = allocation.prepare_channel() => result,
@@ -692,7 +688,7 @@ pub async fn run_session(
     };
     if let Err(error) = channel {
         let _ = tokio::time::timeout(DEALLOCATE_TIMEOUT, allocation.deallocate()).await;
-        return Err(error.context("TURN ChannelBind РѕР±СЏР·Р°С‚РµР»РµРЅ"));
+        return Err(error.context("TURN ChannelBind обязателен"));
     }
     let session = tokio::spawn(run_allocated_session(
         config,
@@ -713,8 +709,8 @@ async fn await_session_task(
         biased;
         result = &mut session => match result {
             Ok(result) => result,
-            Err(error) if error.is_panic() => Err(anyhow!("РїР°РЅРёРєР° СЃРµСЃСЃРёРё РёР·РѕР»РёСЂРѕРІР°РЅР°: {error}")),
-            Err(error) => Err(anyhow!("Р·Р°РґР°С‡Р° СЃРµСЃСЃРёРё Р·Р°РІРµСЂС€РµРЅР° Р°РІР°СЂРёР№РЅРѕ: {error}")),
+            Err(error) if error.is_panic() => Err(anyhow!("паника сессии изолирована: {error}")),
+            Err(error) => Err(anyhow!("задача сессии завершена аварийно: {error}")),
         },
         _ = cancel.cancelled() => {
             match tokio::time::timeout(SESSION_SHUTDOWN_GRACE, &mut session).await {
@@ -744,7 +740,7 @@ async fn run_allocated_session(
     let session_cancel = CancellationToken::new();
     let turn_receiver = allocation.take_receiver()?;
     crate::log_error!(
-        "[РЎР•РЎРЎРРЇ #{}] [DIRECT] РџСЂСЏРјРѕР№ СЂРµР¶РёРј РѕР±С„СѓСЃРєР°С†РёРё ({:?})",
+        "[СЕССИЯ #{}] [DIRECT] Прямой режим обфускации ({:?})",
         config.id,
         config.mode
     );
@@ -803,10 +799,7 @@ async fn run_allocated_session(
     if let Some(ready_tx) = runtime.ready_tx.take() {
         let _ = ready_tx.send(());
     }
-    crate::log_error!(
-        "[Р’РћР РљР•Р  #{}] [READY] РџРѕС‚РѕРє РіРѕС‚РѕРІ вњ“",
-        config.id
-    );
+    crate::log_error!("[ВОРКЕР #{}] [READY] Поток готов ✓", config.id);
     runtime.events.ready(config.id);
     config.repair.mark_ready(config.id);
     let _active = ActiveConnection::new(runtime.stats.clone(), runtime.events.clone());
@@ -854,7 +847,7 @@ async fn run_allocated_session(
     };
     session_cancel.cancel();
     stop_session_tasks(completed, writer, reader).await;
-    crate::log_error!("[РЎР•РЎРЎРРЇ #{}] Р—Р°РІРµСЂС€РµРЅР°", config.id);
+    crate::log_error!("[СЕССИЯ #{}] Завершена", config.id);
     session_result?;
     Ok(config_delivered)
 }
@@ -894,13 +887,12 @@ async fn request_configuration(
         writer
             .send_bytes(request.as_ref())
             .await
-            .context("РѕС‚РїСЂР°РІРєР° GETCONF")?;
+            .context("отправка GETCONF")?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let packet = loop {
             match tokio::time::timeout_at(deadline, reader.recv()).await {
                 Ok(result) => {
-                    let packet =
-                        result.context("GETCONF С‡С‚РµРЅРёРµ РѕС‚РІРµС‚Р° РєРѕРЅС„РёРіР°")?;
+                    let packet = result.context("GETCONF: чтение ответа конфигурации")?;
                     if is_panel_restart_notice(packet.as_slice()) {
                         events.panel_restart();
                         continue;
@@ -913,7 +905,7 @@ async fn request_configuration(
                 Err(_) if attempt + 1 < CONFIG_RESPONSE_TIMEOUT_MS.len() => continue 'attempts,
                 Err(_) => {
                     bail!(
-                        "GETCONF С‡С‚РµРЅРёРµ РѕС‚РІРµС‚Р° РєРѕРЅС„РёРіР°: timeout РїРѕСЃР»Рµ {} РїРѕРїС‹С‚РѕРє",
+                        "GETCONF: timeout чтения ответа конфигурации после {} попыток",
                         CONFIG_RESPONSE_TIMEOUT_MS.len()
                     )
                 }
@@ -925,12 +917,12 @@ async fn request_configuration(
                 if let Some(sender) = &config_tx {
                     let _ = sender.try_send(value);
                 }
-                crate::log_error!("[Р’РћР РљР•Р  #{}] РљРѕРЅС„РёРі РїРѕР»СѓС‡РµРЅ", config.id);
+                crate::log_error!("[ВОРКЕР #{}] Конфигурация получена", config.id);
                 return Ok(true);
             }
         }
     }
-    bail!("GETCONF РѕС‚РІРµС‚ РЅРµ РїРѕР»СѓС‡РµРЅ")
+    bail!("GETCONF: ответ не получен")
 }
 
 async fn writer_loop(
