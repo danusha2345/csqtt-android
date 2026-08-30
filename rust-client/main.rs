@@ -114,11 +114,17 @@ struct Arguments {
     #[arg(long, default_value = "")]
     tun_uds: String,
     #[arg(long, default_value = "")]
+    tun_device: String,
+    #[arg(long, default_value = "")]
+    tun_config_hook: String,
+    #[arg(long, default_value = "")]
     socks5: String,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
     #[arg(long, default_value_t = false)]
     credentials_stdin: bool,
+    #[arg(long, default_value = "")]
+    credentials_file: String,
 }
 
 fn main() {
@@ -130,9 +136,19 @@ fn main() {
         }
     }));
     let mut arguments = Arguments::parse_from(normalized_arguments());
-    if arguments.credentials_stdin
-        && let Err(error) = read_stdin_credentials(&mut arguments)
-    {
+    let credentials_result =
+        if arguments.credentials_stdin && !arguments.credentials_file.is_empty() {
+            Err(anyhow::anyhow!(
+                "--credentials-stdin and --credentials-file are mutually exclusive"
+            ))
+        } else if arguments.credentials_stdin {
+            read_stdin_credentials(&mut arguments)
+        } else if !arguments.credentials_file.is_empty() {
+            read_credentials_file(&mut arguments)
+        } else {
+            Ok(())
+        };
+    if let Err(error) = credentials_result {
         eprintln!("[ФАТАЛ] {error:#}");
         std::process::exit(1);
     }
@@ -253,13 +269,27 @@ async fn run(arguments: Arguments) -> Result<()> {
     let parent_task = start_parent_monitor(cancel.clone());
     events.process(std::process::id());
     let pool = PacketPool::new(packet_pool_size(workers));
-    if !arguments.socks5.is_empty() && !arguments.tun_uds.is_empty() {
-        bail!("--socks5 and --tun-uds are mutually exclusive");
+    let tun_modes =
+        usize::from(!arguments.tun_uds.is_empty()) + usize::from(!arguments.tun_device.is_empty());
+    if tun_modes > 1 {
+        bail!("--tun-uds and --tun-device are mutually exclusive");
     }
-    let tun_uds = (!arguments.tun_uds.is_empty()).then_some(arguments.tun_uds.clone());
+    if !arguments.socks5.is_empty() && tun_modes != 0 {
+        bail!("--socks5 and TUN mode are mutually exclusive");
+    }
+    if !arguments.tun_config_hook.is_empty() && arguments.tun_device.is_empty() {
+        bail!("--tun-config-hook requires --tun-device");
+    }
+    let tun_source = if !arguments.tun_device.is_empty() {
+        Some(tun::Source::Device(arguments.tun_device.clone()))
+    } else if !arguments.tun_uds.is_empty() {
+        Some(tun::Source::Uds(arguments.tun_uds.clone()))
+    } else {
+        None
+    };
     let dispatcher_result = Dispatcher::start(
         &arguments.listen,
-        tun_uds,
+        tun_source,
         pool.clone(),
         stats.clone(),
         cancel.clone(),
@@ -316,6 +346,9 @@ async fn run(arguments: Arguments) -> Result<()> {
     let stats_task = tokio::spawn(stats.clone().run(events.clone(), cancel.clone()));
     let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
     let config_events = events.clone();
+    let config_cancel = cancel.clone();
+    let tun_device = arguments.tun_device.clone();
+    let tun_config_hook = arguments.tun_config_hook.clone();
     let config_task = tokio::spawn(async move {
         let mut last_config = None;
         while let Some(config) = config_rx.recv().await {
@@ -328,6 +361,13 @@ async fn run(arguments: Arguments) -> Result<()> {
                 let ip = fields.next().unwrap_or_default();
                 let dns = fields.next().unwrap_or_default();
                 crate::log_error!("[КЛИЕНТ] Tunnel IP: {ip}/32 | DNS: {dns}");
+                if !tun_config_hook.is_empty()
+                    && let Err(error) =
+                        run_tun_config_hook(&tun_config_hook, &tun_device, ip, dns).await
+                {
+                    crate::log_error!("[ОШИБКА] TUN config hook: {error:#}");
+                    config_cancel.cancel();
+                }
             }
             config_events.config(&config);
             last_config = Some(config);
@@ -501,10 +541,13 @@ fn normalize_cli_argument(argument: String) -> String {
         "gen",
         "salt",
         "tun-uds",
+        "tun-device",
+        "tun-config-hook",
         "socks5",
         "allow-hash-redistribution",
         "validate-vk-hashes",
         "credentials-stdin",
+        "credentials-file",
     ];
     if let Some(value) = argument.strip_prefix('-') {
         let name = value.split('=').next().unwrap_or(value);
@@ -513,6 +556,24 @@ fn normalize_cli_argument(argument: String) -> String {
         }
     }
     argument
+}
+
+async fn run_tun_config_hook(path: &str, device: &str, ip: &str, dns: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        bail!("путь --tun-config-hook должен быть абсолютным");
+    }
+    let status = tokio::process::Command::new(path)
+        .arg("up")
+        .env("CSQTT_TUN_DEVICE", device)
+        .env("CSQTT_TUN_IP", ip)
+        .env("CSQTT_TUN_DNS", dns)
+        .status()
+        .await
+        .with_context(|| format!("запуск {path}"))?;
+    if !status.success() {
+        bail!("{path} завершился с {status}");
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -530,8 +591,15 @@ fn apply_stdin_credentials(arguments: &mut Arguments, line: &str) -> Result<()> 
         .trim_end_matches(['\r', '\n'])
         .strip_prefix(PREFIX)
         .context("неверный префикс credentials stdin")?;
+    apply_credentials_json(arguments, payload)
+}
+
+fn apply_credentials_json(arguments: &mut Arguments, payload: &str) -> Result<()> {
+    if payload.len() > 128 * 1024 {
+        bail!("слишком большой JSON credentials");
+    }
     let credentials: StdinCredentials =
-        serde_json::from_str(payload).context("неверный JSON credentials stdin")?;
+        serde_json::from_str(payload).context("неверный JSON credentials")?;
     if credentials.password.is_empty()
         || (credentials.vk.is_empty() && arguments.vk_hash_mode != "auto_js")
     {
@@ -540,6 +608,13 @@ fn apply_stdin_credentials(arguments: &mut Arguments, line: &str) -> Result<()> 
     arguments.password = credentials.password;
     arguments.vk = credentials.vk;
     Ok(())
+}
+
+fn read_credentials_file(arguments: &mut Arguments) -> Result<()> {
+    let path = arguments.credentials_file.clone();
+    let payload = std::fs::read_to_string(&path)
+        .with_context(|| format!("чтение credentials file {path}"))?;
+    apply_credentials_json(arguments, &payload)
 }
 
 fn read_stdin_credentials(arguments: &mut Arguments) -> Result<()> {
@@ -878,6 +953,27 @@ mod worker_count_tests {
             r#"CSQTT_CREDENTIALS|{"password":"secret","vk":"hash-a,hash-b"}"#,
         )
         .unwrap();
+        assert_eq!(arguments.password, "secret");
+        assert_eq!(arguments.vk, "hash-a,hash-b");
+    }
+
+    #[test]
+    fn credentials_file_populates_secrets_without_argv() {
+        use std::io::Write;
+
+        let path = std::env::temp_dir().join(format!(
+            "csqtt-credentials-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        write!(file, r#"{{"password":"secret","vk":"hash-a,hash-b"}}"#).unwrap();
+        drop(file);
+        let path_argument = path.to_string_lossy().into_owned();
+        let mut arguments =
+            Arguments::try_parse_from(["csqtt-client", "--credentials-file", &path_argument])
+                .unwrap();
+        read_credentials_file(&mut arguments).unwrap();
+        std::fs::remove_file(path).unwrap();
         assert_eq!(arguments.password, "secret");
         assert_eq!(arguments.vk, "hash-a,hash-b");
     }

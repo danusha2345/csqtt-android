@@ -33,6 +33,7 @@
 ## Возможности
 
 - Android VPN на `arm64-v8a` и `armeabi-v7a`;
+- OpenWrt-клиент с нативным TUN и `procd` для `x86_64`, `aarch64` и `armv7`;
 - TURN через UDP или TCP/TLS;
 - режим локального SOCKS5 `CONNECT` на `127.0.0.1` без Android VPN;
 - маскировка `audio` и `video`;
@@ -77,6 +78,8 @@ cd rust-server
 cargo +1.97.1 test --locked
 cargo +1.97.1 zigbuild --release --locked --target x86_64-unknown-linux-musl
 ```
+
+OpenWrt-пакеты и инструкция находятся в [openwrt/README.md](openwrt/README.md).
 
 ## Безопасность и ограничения
 

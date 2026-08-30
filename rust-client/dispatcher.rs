@@ -275,12 +275,12 @@ pub struct Dispatcher {
 impl Dispatcher {
     pub async fn start(
         listen: &str,
-        tun_uds: Option<String>,
+        tun_source: Option<tun::Source>,
         pool: Arc<PacketPool>,
         stats: Arc<Stats>,
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, String)> {
-        let tun_mode = tun_uds.is_some();
+        let tun_mode = tun_source.is_some();
         let (return_latency_tx, return_latency_rx) =
             packet_channel(RETURN_LATENCY_CAPACITY, !tun_mode);
         let (return_priority_tx, return_priority_rx) =
@@ -297,8 +297,8 @@ impl Dispatcher {
             proxy_frames: OnceLock::new(),
             proxy_routes: Mutex::new(HashMap::new()),
         });
-        if let Some(name) = tun_uds {
-            crate::log_error!("[КЛИЕНТ] Запуск UDS-слушателя: {name} для получения TUN FD...");
+        if let Some(source) = tun_source {
+            crate::log_error!("[КЛИЕНТ] Запуск источника {}...", source.description());
             let io_dispatcher = dispatcher.clone();
             let task_cancel = dispatcher.cancel.clone();
             let io_task = spawn_critical("TUN dispatcher", task_cancel, async move {
@@ -306,19 +306,20 @@ impl Dispatcher {
                 let mut return_priority_rx = return_priority_rx;
                 let mut return_rx = return_rx;
                 loop {
-                    let result = tun::receive_fd(name.clone(), io_dispatcher.cancel.clone()).await;
+                    let result = source.open(io_dispatcher.cancel.clone()).await;
                     let file = match result {
                         Ok(file) => file,
                         Err(_) if io_dispatcher.cancel.is_cancelled() => return,
                         Err(error) => {
                             crate::log_error!(
-                                "[ОШИБКА] Не удалось получить TUN FD из UDS: {error}"
+                                "[ОШИБКА] Не удалось открыть {}: {error}",
+                                source.description()
                             );
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
                     };
-                    crate::log_error!("[КЛИЕНТ] TUN FD успешно получен!");
+                    crate::log_error!("[КЛИЕНТ] {} успешно открыт", source.description());
                     return_latency_rx.resume();
                     return_priority_rx.resume();
                     return_rx.resume();

@@ -1,0 +1,59 @@
+#!/bin/sh
+# shellcheck shell=sh disable=SC3043
+
+TABLE_DEFAULT=202
+RULE_PRIORITY=12000
+
+config_value() {
+	uci -q get "csqtt.main.$1"
+}
+
+delete_firewall_rules() {
+	local device="$1"
+	local lan="$2"
+	while iptables -w 5 -C FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
+		iptables -w 5 -D FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT
+	done
+	while iptables -w 5 -C FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
+		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT
+	done
+	while iptables -w 5 -t nat -C POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE 2>/dev/null; do
+		iptables -w 5 -t nat -D POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE
+	done
+}
+
+device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
+lan="$(config_value lan_device)"
+route_lan="$(config_value route_lan)"
+table="$(config_value route_table)"
+[ -n "$device" ] || device=csqtt0
+[ -n "$lan" ] || lan=br-lan
+[ -n "$table" ] || table=$TABLE_DEFAULT
+
+case "$1" in
+	up)
+		[ -n "$CSQTT_TUN_IP" ] || { logger -t csqtt "empty tunnel IP"; exit 1; }
+		ip link set dev "$device" mtu 1380 up || exit 1
+		ip -4 address replace "$CSQTT_TUN_IP/32" dev "$device" || exit 1
+		if [ "$route_lan" = 1 ]; then
+			ip -4 route replace default dev "$device" table "$table" || exit 1
+			while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
+			ip -4 rule add priority "$RULE_PRIORITY" iif "$lan" lookup "$table" || exit 1
+			delete_firewall_rules "$device" "$lan"
+			iptables -w 5 -I FORWARD 1 -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
+			iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
+			iptables -w 5 -t nat -I POSTROUTING 1 -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE || exit 1
+		fi
+		logger -t csqtt "configured $device as $CSQTT_TUN_IP/32; DNS $CSQTT_TUN_DNS"
+		;;
+	down)
+		delete_firewall_rules "$device" "$lan"
+		while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
+		ip -4 route del default dev "$device" table "$table" 2>/dev/null
+		ip link set dev "$device" down 2>/dev/null
+		;;
+	*)
+		echo "usage: $0 up|down" >&2
+		exit 2
+		;;
+esac
