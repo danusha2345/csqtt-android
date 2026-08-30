@@ -79,7 +79,35 @@ cargo +1.97.1 test --locked
 cargo +1.97.1 zigbuild --release --locked --target x86_64-unknown-linux-musl
 ```
 
-OpenWrt-пакеты и инструкция находятся в [openwrt/README.md](openwrt/README.md).
+## OpenWrt
+
+Для роутеров опубликован первый beta-порт с нативным Linux TUN, UCI-конфигом,
+`procd`-сервисом, policy routing для LAN и дополнительным режимом локального
+SOCKS5. Поддерживаются:
+
+- `x86_64`;
+- `aarch64` (`aarch64_generic`);
+- `armv7` hard-float с NEON (`arm_cortex-a7_neon-vfpv4`).
+
+Скачать готовые файлы: [CSQTT OpenWrt 0.1.0 Beta](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v0.1.0-beta.1).
+
+Полная русская инструкция по выбору архитектуры, установке, UCI-настройке,
+проверке и остановке: [openwrt/README.md](openwrt/README.md).
+
+- Для OpenWrt 25.12+ используйте универсальный `.tar.gz`.
+- Для OpenWrt 24.10 можно использовать `.tar.gz` или готовый `.ipk`.
+- MIPS/MIPSel пока не поддерживаются.
+
+### Нужны тестировщики
+
+Первый OpenWrt-порт опубликован как beta. Если у вас есть роутер `x86_64`,
+`aarch64` или `armv7` с NEON, пожалуйста, установите подходящую сборку по
+инструкции, проверьте TUN/SOCKS5, перезапуск сервиса и работу устройств в LAN,
+а результат сообщите в [GitHub Issues](https://github.com/danusha2345/csqtt-android/issues).
+
+В отчёте укажите модель роутера, версию OpenWrt, вывод `uname -m`, выбранный
+режим и очищенный `logread -e csqtt`. Не публикуйте пароль подключения и
+VK-хеши.
 
 ## Безопасность и ограничения
 
