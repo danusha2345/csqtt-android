@@ -2091,7 +2091,7 @@ static PWA_ICON_512_PNG: LazyLock<Vec<u8>> = LazyLock::new(|| {
         .unwrap_or_default()
 });
 
-const PWA_SERVICE_WORKER: &str = r##"const CACHE_NAME = 'csqtt-panel-shell-2.1.7-pwa2';
+const PWA_SERVICE_WORKER: &str = r##"const CACHE_NAME = 'csqtt-panel-shell-2.1.8-pwa2';
 const SHELL_ASSETS = ['/manifest.webmanifest', '/pwa-icon.svg', '/pwa-icon-192.png', '/pwa-icon-512.png'];
 const OFFLINE_PAGE = '<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CSQTT</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0a0c;color:#f4f4f5;font:16px system-ui,-apple-system,Segoe UI,Roboto,sans-serif}main{max-width:320px;padding:28px;text-align:center}h1{margin:0 0 12px;color:#55adff;font-size:28px}p{margin:0;color:#a1a1aa;line-height:1.5}</style><main><h1>CSQTT</h1><p>Нет соединения с сервером. Проверьте сеть и откройте панель снова.</p></main></html>';
 
@@ -2888,7 +2888,7 @@ const PANEL_HTML: &str = r##"
                 <button class="btn btn-ghost btn-icon" onclick="toggleTheme()" title="Сменить тему">
                     <svg id="themeIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
                 </button>
-				<span class="version-logo">v2.1.7</span>
+				<span class="version-logo">v2.1.8</span>
             </div>
         </div>
     </header>
@@ -4295,7 +4295,7 @@ mod tests {
 
     #[test]
     fn panel_version_badge_is_current_and_has_no_personal_signature() {
-        assert!(PANEL_HTML.contains("<span class=\"version-logo\">v2.1.7</span>"));
+        assert!(PANEL_HTML.contains("<span class=\"version-logo\">v2.1.8</span>"));
         assert!(!PANEL_HTML.contains("by amurcanov"));
     }
 
