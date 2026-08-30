@@ -16,6 +16,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
+import org.json.JSONArray
+import org.json.JSONObject
 
 object VkAutoCallsManager {
     data class StartResult(
@@ -53,10 +55,12 @@ object VkAutoCallsManager {
         }
 
     suspend fun startAutoCalls(context: Context, token: String, workers: Int): StartResult? {
-        if (token.isBlank()) return null
-
         synchronized(pendingLogsLock) { pendingLogs.clear() }
-        activeCalls.clear()
+        if (!finishPreviousCalls(context)) {
+            log("vk_auto_call_cleanup_error", "[ERR] Предыдущие звонки VK не завершены", 95, true)
+            return null
+        }
+        if (token.isBlank()) return null
 
         val count = callCountForWorkers(workers)
         val hashes = ArrayList<String>(count)
@@ -79,6 +83,7 @@ object VkAutoCallsManager {
                     activeToken = token
                     val call = result.value as VkApi.StartedCall
                     activeCalls.add(ActiveCall(callId = call.callId, hashKey = sha256Hex(call.hash)))
+                    persistActiveCalls(context, token)
                     hashes.add(call.hash)
                     log(
                         "vk_call_created_progress",
@@ -151,8 +156,13 @@ object VkAutoCallsManager {
         }
     }
 
-    fun finishActiveCalls() {
-        if (activeCalls.isEmpty()) return
+    fun finishActiveCalls(context: Context) {
+        if (activeCalls.isEmpty()) {
+            TunnelManager.scope.launch(Dispatchers.IO + NonCancellable) {
+                finishPreviousCalls(context)
+            }
+            return
+        }
         val token = activeToken
         val calls = ArrayList(activeCalls)
         activeCalls.clear()
@@ -160,13 +170,59 @@ object VkAutoCallsManager {
         if (token.isNullOrBlank()) return
 
         TunnelManager.scope.launch(Dispatchers.IO + NonCancellable) {
-            withTimeoutOrNull(CsqttConstants.VkAutoHash.FINISH_CALLS_TIMEOUT_MS) {
+            val completed = withTimeoutOrNull(CsqttConstants.VkAutoHash.FINISH_CALLS_TIMEOUT_MS) {
                 finishCalls(calls, token, logResults = true)
             }
+            if (completed == true) SettingsStore(context.applicationContext).clearActiveVkCallSession()
         }
     }
 
-    private suspend fun finishCalls(calls: List<ActiveCall>, token: String, logResults: Boolean) {
+    private suspend fun finishPreviousCalls(context: Context): Boolean {
+        val store = SettingsStore(context.applicationContext)
+        val persisted = parseSession(store.loadActiveVkCallSession())
+        val callsById = LinkedHashMap<String, ActiveCall>()
+        persisted?.second?.forEach { callsById[it.callId] = it }
+        activeCalls.forEach { callsById[it.callId] = it }
+        val cleanupToken = persisted?.first?.takeIf(String::isNotBlank) ?: activeToken
+        if (callsById.isEmpty()) {
+            activeCalls.clear()
+            activeToken = null
+            store.clearActiveVkCallSession()
+            return true
+        }
+        if (cleanupToken.isNullOrBlank()) return false
+        val completed = withTimeoutOrNull(CsqttConstants.VkAutoHash.FINISH_CALLS_TIMEOUT_MS) {
+            finishCalls(callsById.values.toList(), cleanupToken, logResults = false)
+        } == true
+        if (completed) {
+            activeCalls.clear()
+            activeToken = null
+            store.clearActiveVkCallSession()
+        }
+        return completed
+    }
+
+    private suspend fun persistActiveCalls(context: Context, token: String) {
+        val payload = JSONObject()
+            .put("token", token)
+            .put("call_ids", JSONArray(activeCalls.map { it.callId }))
+            .toString()
+        SettingsStore(context.applicationContext).saveActiveVkCallSession(payload)
+    }
+
+    private fun parseSession(raw: String): Pair<String, List<ActiveCall>>? {
+        if (raw.isBlank()) return null
+        return runCatching {
+            val json = JSONObject(raw)
+            val ids = json.getJSONArray("call_ids")
+            val calls = (0 until ids.length()).map { index ->
+                ActiveCall(ids.getString(index), "")
+            }
+            json.getString("token") to calls
+        }.getOrNull()
+    }
+
+    private suspend fun finishCalls(calls: List<ActiveCall>, token: String, logResults: Boolean): Boolean {
         val results = coroutineScope {
             val deferredResults = calls.mapIndexed { index, call ->
                 async(Dispatchers.IO) {
@@ -202,6 +258,7 @@ object VkAutoCallsManager {
                 }
             }
         }
+        return results.none { (_, result) -> result is VkApiResult.Failed }
     }
 
     private fun log(key: String, message: String, priority: Int, isError: Boolean) {

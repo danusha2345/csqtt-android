@@ -8,8 +8,25 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.PublicKey
 
 class DeployResultPolicyTest {
+    private fun publicKey(bytes: ByteArray) = object : PublicKey {
+        override fun getAlgorithm() = "test"
+        override fun getFormat() = "RAW"
+        override fun getEncoded() = bytes
+    }
+
+    @Test
+    fun sshHostKeyFingerprintIsStableAndBoundToKeyBytes() {
+        val first = SshHostKeyPins.fingerprint(publicKey(byteArrayOf(1, 2, 3)))
+        val same = SshHostKeyPins.fingerprint(publicKey(byteArrayOf(1, 2, 3)))
+        val changed = SshHostKeyPins.fingerprint(publicKey(byteArrayOf(1, 2, 4)))
+        assertEquals(first, same)
+        assertFalse(first == changed)
+        assertEquals("vps.example:2222", SshHostKeyPins.key("VPS.EXAMPLE", 2222))
+    }
+
     @Test
     fun exactMarkerAndZeroExitAreRequired() {
         assertTrue(isSuccessfulDeployResult(0, "done\nCSQTT_DEPLOY_OK\n"))

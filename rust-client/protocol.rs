@@ -170,6 +170,7 @@ mod tests {
         ] {
             assert!(is_control_response(value));
         }
+        assert!(!is_control_response(b"CSQPX1\x02\0\0\0\0\0\0\0\x01"));
         assert!(!is_control_response(&[0x45, 0, 0, 20]));
     }
 

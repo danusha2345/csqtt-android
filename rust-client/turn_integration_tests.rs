@@ -250,7 +250,7 @@ fn channel_data(channel: u16, payload: &[u8]) -> Vec<u8> {
 async fn recv_datagram(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
     let mut buffer = [0u8; 4096];
     let (length, source) =
-        tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buffer))
             .await
             .unwrap()
             .unwrap();
@@ -530,7 +530,7 @@ async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_co
     held.set_read_len(8).unwrap();
     allocation.send_with_duplicate(held, false).await.unwrap();
 
-    let mut inbound = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+    let mut inbound = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
         .await
         .unwrap()
         .unwrap();

@@ -6,6 +6,7 @@ use crate::{
     model::{MAX_PASSWORDS, PasswordEntry, is_expired, now, random_password, random_token},
     protocol, read_unpoison,
 };
+use aes::Aes256;
 use axum::{
     Json, Router,
     body::Body,
@@ -16,6 +17,11 @@ use axum::{
     routing::{get, post, put},
 };
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ctr::cipher::{KeyIvInit, StreamCipher};
+use hkdf::Hkdf;
+use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -125,6 +131,90 @@ struct ClientInfo {
 
 const CAESAR_SHIFT: u8 = 47;
 pub(crate) const MAX_WEB_SESSIONS: usize = 256;
+const CONFIG_SYNC_MAX_CLOCK_SKEW_SECONDS: i64 = 300;
+type HmacSha256 = Hmac<Sha256>;
+type Aes256Ctr = ctr::Ctr128BE<Aes256>;
+
+#[derive(Clone)]
+struct ConfigSyncKeys {
+    id: [u8; 16],
+    auth: [u8; 32],
+    encryption: [u8; 32],
+}
+
+#[derive(Serialize)]
+struct ConfigSyncPayload {
+    version: u8,
+    active: bool,
+    peer_port: u16,
+    web_port: u16,
+    vk_hashes: String,
+    expires_at: i64,
+    revision: String,
+}
+
+fn config_sync_keys(password: &str) -> Option<ConfigSyncKeys> {
+    if password.is_empty() {
+        return None;
+    }
+    let hk = Hkdf::<Sha256>::new(Some(b"CSQTT-CONFIG-SYNC-v1"), password.as_bytes());
+    let mut expanded = [0u8; 80];
+    hk.expand(b"client-config-envelope", &mut expanded).ok()?;
+    let mut id = [0u8; 16];
+    let mut auth = [0u8; 32];
+    let mut encryption = [0u8; 32];
+    id.copy_from_slice(&expanded[..16]);
+    auth.copy_from_slice(&expanded[16..48]);
+    encryption.copy_from_slice(&expanded[48..80]);
+    Some(ConfigSyncKeys {
+        id,
+        auth,
+        encryption,
+    })
+}
+
+fn config_sync_id(password: &str) -> Option<String> {
+    config_sync_keys(password).map(|keys| hex::encode(keys.id))
+}
+
+fn config_sync_signature(
+    keys: &ConfigSyncKeys,
+    path: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> String {
+    let mut mac = HmacSha256::new_from_slice(&keys.auth).expect("HMAC key length");
+    mac.update(b"GET\n");
+    mac.update(path.as_bytes());
+    mac.update(b"\n");
+    mac.update(timestamp.as_bytes());
+    mac.update(b"\n");
+    mac.update(nonce.as_bytes());
+    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+fn encrypted_config_response(
+    keys: &ConfigSyncKeys,
+    request_nonce: &[u8],
+    payload: &ConfigSyncPayload,
+) -> Result<serde_json::Value, &'static str> {
+    let mut ciphertext = serde_json::to_vec(payload).map_err(|_| "encode config")?;
+    let mut iv = [0u8; 16];
+    OsRng.fill_bytes(&mut iv);
+    let mut cipher = Aes256Ctr::new((&keys.encryption).into(), (&iv).into());
+    cipher.apply_keystream(&mut ciphertext);
+    let mut mac = HmacSha256::new_from_slice(&keys.auth).expect("HMAC key length");
+    mac.update(b"CSQTT-CONFIG-RESPONSE-v1\0");
+    mac.update(request_nonce);
+    mac.update(&iv);
+    mac.update(&ciphertext);
+    Ok(serde_json::json!({
+        "version": 1,
+        "iv": URL_SAFE_NO_PAD.encode(iv),
+        "ciphertext": URL_SAFE_NO_PAD.encode(&ciphertext),
+        "mac": URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
+    }))
+}
 pub(crate) const MAX_LOGIN_LIMITS: usize = 4_096;
 const MAX_WEB_CONNECTIONS: usize = 64;
 
@@ -187,14 +277,134 @@ async fn auth_middleware(
     if !cookie_tokens(request.headers()).is_empty() {
         response.headers_mut().insert(
             header::SET_COOKIE,
-            expired_session_cookie().parse().unwrap(),
+            expired_session_cookie(state.app.secure_cookie)
+                .parse()
+                .unwrap(),
         );
     }
     response
 }
 
-fn expired_session_cookie() -> &'static str {
-    "csqtt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure"
+fn session_cookie(token: &str, secure: bool) -> String {
+    let secure_attribute = if secure { "; Secure" } else { "" };
+    format!(
+        "csqtt_session={token}; Path=/; Max-Age=86400; HttpOnly; SameSite=Strict{secure_attribute}"
+    )
+}
+
+fn expired_session_cookie(secure: bool) -> String {
+    let secure_attribute = if secure { "; Secure" } else { "" };
+    format!("csqtt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure_attribute}")
+}
+
+async fn client_config(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let timestamp = match headers
+        .get("x-csqtt-timestamp")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => value,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if !timestamp
+        .parse::<i64>()
+        .is_ok_and(|value| now().abs_diff(value) <= CONFIG_SYNC_MAX_CLOCK_SKEW_SECONDS as u64)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let nonce_text = match headers
+        .get("x-csqtt-nonce")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => value,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let request_nonce = match URL_SAFE_NO_PAD.decode(nonce_text) {
+        Ok(value) if value.len() == 16 => value,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let supplied_signature = match headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("CSQTT-HMAC "))
+    {
+        Some(value) => value,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let (password, active, peer_port, vk_hashes, expires_at) = {
+        let db = state.app.db.read().await;
+        if config_sync_id(&db.main_password)
+            .as_deref()
+            .is_some_and(|candidate| constant_equal(candidate, &id))
+        {
+            (
+                db.main_password.clone(),
+                true,
+                state.app.listen.port(),
+                String::new(),
+                0,
+            )
+        } else if let Some((password, entry)) = db.passwords.iter().find(|(password, _)| {
+            config_sync_id(password)
+                .as_deref()
+                .is_some_and(|candidate| constant_equal(candidate, &id))
+        }) {
+            (
+                password.clone(),
+                !entry.is_deactivated && !is_expired(entry),
+                if entry.dtls_port == 0 {
+                    state.app.listen.port()
+                } else {
+                    entry.dtls_port
+                },
+                entry.vk_hashes.clone(),
+                entry.expires_at,
+            )
+        } else {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let Some(keys) = config_sync_keys(&password) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = format!("/api/client-config/{id}");
+    let expected_signature = config_sync_signature(&keys, &path, timestamp, nonce_text);
+    if !constant_equal(&expected_signature, supplied_signature) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let mut revision_hasher = Sha256::new();
+    revision_hasher.update([active as u8]);
+    revision_hasher.update(peer_port.to_be_bytes());
+    revision_hasher.update(state.app.web_port.to_be_bytes());
+    revision_hasher.update(expires_at.to_be_bytes());
+    revision_hasher.update(vk_hashes.as_bytes());
+    let payload = ConfigSyncPayload {
+        version: 1,
+        active,
+        peer_port,
+        web_port: state.app.web_port,
+        vk_hashes,
+        expires_at,
+        revision: hex::encode(revision_hasher.finalize()),
+    };
+    let response = match encrypted_config_response(&keys, &request_nonce, &payload) {
+        Ok(response) => response,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(response),
+    )
+        .into_response()
 }
 
 // The plain-HTTP redirect echoes the client Host header into Location.
@@ -230,7 +440,9 @@ async fn root(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if !cookie_tokens(&headers).is_empty() {
         response.headers_mut().insert(
             header::SET_COOKIE,
-            expired_session_cookie().parse().unwrap(),
+            expired_session_cookie(state.app.secure_cookie)
+                .parse()
+                .unwrap(),
         );
     }
     response
@@ -372,8 +584,7 @@ async fn login(
         )
             .into_response();
     }
-    let cookie =
-        format!("csqtt_session={token}; Path=/; Max-Age=86400; HttpOnly; SameSite=Strict; Secure");
+    let cookie = session_cookie(&token, state.app.secure_cookie);
     (StatusCode::OK, [(header::SET_COOKIE, cookie)], "ok").into_response()
 }
 
@@ -422,7 +633,10 @@ async fn logout(State(state): State<WebState>, headers: HeaderMap) -> Response {
     }
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, expired_session_cookie())],
+        [(
+            header::SET_COOKIE,
+            expired_session_cookie(state.app.secure_cookie),
+        )],
         "ok",
     )
         .into_response()
@@ -432,7 +646,10 @@ async fn logout_all(State(state): State<WebState>) -> Response {
     state.app.web_sessions.clear();
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, expired_session_cookie())],
+        [(
+            header::SET_COOKIE,
+            expired_session_cookie(state.app.secure_cookie),
+        )],
         "ok",
     )
         .into_response()
@@ -1809,6 +2026,7 @@ pub async fn run(
         .route("/pwa-icon-192.png", get(pwa_icon_192))
         .route("/pwa-icon-512.png", get(pwa_icon_512))
         .route("/api/login", post(login))
+        .route("/api/client-config/{id}", get(client_config))
         .merge(protected)
         .layer(DefaultBodyLimit::max(WEB_BODY_LIMIT_BYTES))
         .layer(middleware::from_fn(security_headers))
@@ -1873,7 +2091,7 @@ static PWA_ICON_512_PNG: LazyLock<Vec<u8>> = LazyLock::new(|| {
         .unwrap_or_default()
 });
 
-const PWA_SERVICE_WORKER: &str = r##"const CACHE_NAME = 'csqtt-panel-shell-2.1.7-pwa2';
+const PWA_SERVICE_WORKER: &str = r##"const CACHE_NAME = 'csqtt-panel-shell-2.1.8-pwa2';
 const SHELL_ASSETS = ['/manifest.webmanifest', '/pwa-icon.svg', '/pwa-icon-192.png', '/pwa-icon-512.png'];
 const OFFLINE_PAGE = '<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CSQTT</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0a0c;color:#f4f4f5;font:16px system-ui,-apple-system,Segoe UI,Roboto,sans-serif}main{max-width:320px;padding:28px;text-align:center}h1{margin:0 0 12px;color:#55adff;font-size:28px}p{margin:0;color:#a1a1aa;line-height:1.5}</style><main><h1>CSQTT</h1><p>Нет соединения с сервером. Проверьте сеть и откройте панель снова.</p></main></html>';
 
@@ -2670,7 +2888,7 @@ const PANEL_HTML: &str = r##"
                 <button class="btn btn-ghost btn-icon" onclick="toggleTheme()" title="Сменить тему">
                     <svg id="themeIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
                 </button>
-				<span class="version-logo">v2.1.7</span>
+				<span class="version-logo">v2.1.8</span>
             </div>
         </div>
     </header>
@@ -3617,6 +3835,7 @@ const PANEL_HTML: &str = r##"
         function buildCsqttLink(password, peerPort, rawHashes) {
             let url = "csqtt://connect?v=2&host=" + encodeURIComponent(location.hostname) +
                 "&peer=" + encodeURIComponent(peerPort) +
+                "&web=" + encodeURIComponent(Number(location.port) || 443) +
                 "&password=" + encodeURIComponent(password);
             const hashes = String(rawHashes || '').split(',').map(hash => hash.trim()).filter(Boolean);
             if (hashes.length) url += "&hashes=" + hashes.map(encodeURIComponent).join('+');
@@ -3997,8 +4216,9 @@ const PANEL_HTML: &str = r##"
 mod tests {
     use super::{
         LOGIN_HTML, MAX_CLIENT_NAME_BYTES, PANEL_HTML, PWA_ICON_192_PNG, PWA_ICON_512_PNG,
-        PWA_MANIFEST, PWA_SERVICE_WORKER, normalize_client_vk_hashes, process_memory,
-        process_memory_rollup, validate_client_name, validate_proxy_profile_name,
+        PWA_MANIFEST, PWA_SERVICE_WORKER, config_sync_id, config_sync_keys, config_sync_signature,
+        expired_session_cookie, normalize_client_vk_hashes, process_memory, process_memory_rollup,
+        session_cookie, validate_client_name, validate_proxy_profile_name,
     };
 
     #[test]
@@ -4009,6 +4229,34 @@ mod tests {
         assert!(validate_client_name("bad\nname").is_err());
         assert!(validate_proxy_profile_name(&"x".repeat(64)).is_ok());
         assert!(validate_proxy_profile_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn web_cookie_secure_attribute_follows_configuration() {
+        let http = session_cookie("token", false);
+        let https = session_cookie("token", true);
+        assert!(!http.contains("; Secure"));
+        assert!(https.ends_with("; Secure"));
+        assert!(!expired_session_cookie(false).contains("; Secure"));
+        assert!(expired_session_cookie(true).ends_with("; Secure"));
+    }
+
+    #[test]
+    fn config_sync_derivation_matches_android_vector() {
+        let keys = config_sync_keys("test-password").unwrap();
+        assert_eq!(
+            config_sync_id("test-password").unwrap(),
+            "dff5b709384e2329e97d93e7e562e65c"
+        );
+        assert_eq!(
+            hex::encode(keys.auth),
+            "6bcad04a5c4e1f9acb50e97283beb55888eb2febdaa4daa54b36ddd246e34b02",
+        );
+        let path = "/api/client-config/dff5b709384e2329e97d93e7e562e65c";
+        assert_eq!(
+            config_sync_signature(&keys, path, "1788080000", "AQIDBAUGBwgJCgsMDQ4PEA"),
+            "e0c1S9Tv0si2McIUudh5C6Pvnk5SRouWW1rxUZ4wtdw",
+        );
     }
 
     #[test]
@@ -4047,7 +4295,7 @@ mod tests {
 
     #[test]
     fn panel_version_badge_is_current_and_has_no_personal_signature() {
-        assert!(PANEL_HTML.contains("<span class=\"version-logo\">v2.1.7</span>"));
+        assert!(PANEL_HTML.contains("<span class=\"version-logo\">v2.1.8</span>"));
         assert!(!PANEL_HTML.contains("by amurcanov"));
     }
 

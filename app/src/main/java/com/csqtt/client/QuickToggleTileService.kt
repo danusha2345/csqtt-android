@@ -55,14 +55,14 @@ class QuickToggleTileService : TileService() {
                 return
             }
 
-            if (VpnService.prepare(this) != null) {
-                this.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
-                openMainActivity()
-                return
-            }
-
             scope.launch {
                 try {
+                    val proxyMode = SettingsStore(applicationContext).proxyMode.first()
+                    if (requiresVpnPermission(proxyMode) && VpnService.prepare(this@QuickToggleTileService) != null) {
+                        this@QuickToggleTileService.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
+                        openMainActivity()
+                        return@launch
+                    }
                     val intent = buildStartIntent()
                     if (intent == null) {
                         this@QuickToggleTileService.showRaisedToast("Заполните настройки подключения в CSQTT", Toast.LENGTH_LONG)
@@ -96,6 +96,7 @@ class QuickToggleTileService : TileService() {
                 putExtra("peer", source.peer)
                 putExtra("vk_hashes", source.hashes)
                 putExtra("vk_hashes_from_link", source.hashesFromLink)
+                putExtra("config_web_port", source.webPort)
                 putExtra("secondary_vk_hash", store.secondaryVkHash.first())
                 putExtra("workers_per_hash", store.workersPerHash.first())
                 putExtra("port", 0)
@@ -152,4 +153,3 @@ class QuickToggleTileService : TileService() {
         }
     }
 }
-

@@ -60,6 +60,7 @@ import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.resolveConnectionSource
+import com.csqtt.client.requiresVpnPermission
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.components.CsqttScreen
 import com.csqtt.client.ui.design.CsqttShapes
@@ -85,6 +86,8 @@ internal fun ConnectionTab(
 
     val csqttLinkMode by settingsStore.csqttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     val csqttLink by settingsStore.csqttLink.collectAsStateWithLifecycle(initialValue = "")
+    val configSyncEnabled by settingsStore.configSyncEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val proxyMode by settingsStore.proxyMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Proxy.MODE_VPN)
     val peer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = "")
     val vkHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
     val vkHashCheckResultsJson by settingsStore.vkHashCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
@@ -108,10 +111,16 @@ internal fun ConnectionTab(
 
     val parsedLink = remember(csqttLink) { parseCsqttLink(csqttLink) }
     val linkHashes = parsedLink?.hashes.orEmpty()
+    val checkedHashes = remember(vkHashCheckResultsJson) {
+        VkHashValidationCodec.decode(vkHashCheckResultsJson)
+    }
+    val activeLinkHashes = remember(linkHashes, checkedHashes) {
+        VkHashValidationCodec.active(linkHashes, checkedHashes)
+    }
     val manualHashes = remember(vkHashes, vkHashCheckResultsJson) {
         VkHashValidationCodec.active(
             vkHashes.split(Regex("[,\\s\\n]+")),
-            VkHashValidationCodec.decode(vkHashCheckResultsJson),
+            checkedHashes,
         )
     }
     val accountAutoJsMode = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
@@ -121,18 +130,19 @@ internal fun ConnectionTab(
     )
     val vkTokenActive = savedVkAccessToken?.isNotBlank() == true
     val hashesReady = hashSettingsLoaded && when {
-        csqttLinkMode && linkHashes.isNotEmpty() -> true
+        csqttLinkMode && linkHashes.isNotEmpty() -> activeLinkHashes.isNotEmpty()
         autoHashMode -> vkTokenActive
-        else -> manualHashes.isNotEmpty()
+        else -> manualHashes.isNotEmpty() || configSyncEnabled
     }
     val peerPortValid = !manualPortsEnabled || serverPeerPort in 1..65535
     val isManualValid = peer.isNotBlank() && !peer.contains(":") && hashesReady && connectionPassword.isNotBlank() && peerPortValid
     val isLinkValid = parsedLink != null && hashesReady
     val isValid = if (csqttLinkMode) isLinkValid else isManualValid
     val hashStatus = when {
-        csqttLinkMode && linkHashes.isNotEmpty() -> "${linkHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
+        csqttLinkMode && linkHashes.isNotEmpty() -> "${activeLinkHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
         autoHashMode && vkTokenActive -> "Авто"
         autoHashMode -> "Токен"
+        configSyncEnabled && manualHashes.isEmpty() -> "Синхр."
         else -> "${manualHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
     }
 
@@ -142,6 +152,7 @@ internal fun ConnectionTab(
             putExtra("peer", source.peer)
             putExtra("vk_hashes", source.hashes)
             putExtra("vk_hashes_from_link", source.hashesFromLink)
+            putExtra("config_web_port", source.webPort)
             putExtra("secondary_vk_hash", "")
             putExtra("workers_per_hash", workersPerHash)
             putExtra("port", 0)
@@ -160,6 +171,7 @@ internal fun ConnectionTab(
 
     fun startTunnelService() {
         scope.launch {
+            val connectionLabel = if (proxyMode == CsqttConstants.Proxy.MODE_SOCKS5) "SOCKS5" else "VPN"
             val source = resolveConnectionSource(settingsStore) ?: run {
                 context.showRaisedToast("Заполните настройки подключения", Toast.LENGTH_SHORT)
                 return@launch
@@ -172,13 +184,13 @@ internal fun ConnectionTab(
                 .onFailure { error ->
                     TunnelManager.updateLog(
                         "foreground_request_error",
-                        "Android заблокировал запуск VPN: ${error.message ?: error.javaClass.simpleName}",
+                        "Android заблокировал запуск $connectionLabel: ${error.message ?: error.javaClass.simpleName}",
                         99,
                         true,
                     )
                     Toast.makeText(
                         context,
-                        "Android заблокировал запуск VPN. Проверьте ограничения батареи приложения.",
+                        "Android заблокировал запуск $connectionLabel. Проверьте ограничения батареи приложения.",
                         Toast.LENGTH_LONG,
                     ).show()
                 }
@@ -205,6 +217,10 @@ internal fun ConnectionTab(
         }
         if (!isValid) {
             onInvalidConfiguration()
+            return
+        }
+        if (!requiresVpnPermission(proxyMode)) {
+            startTunnelService()
             return
         }
         val vpnIntent = VpnService.prepare(context)

@@ -103,6 +103,9 @@ internal fun SettingsTabContent(
     val activeProfile = tunnelAuthSettings.profile
     val csqttLinkMode by settingsStore.csqttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     val csqttLink by settingsStore.csqttLink.collectAsStateWithLifecycle(initialValue = "")
+    val configSyncEnabled by settingsStore.configSyncEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val proxyMode by settingsStore.proxyMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Proxy.MODE_VPN)
+    val savedProxyPort by settingsStore.proxyPort.collectAsStateWithLifecycle(initialValue = CsqttConstants.Proxy.DEFAULT_SOCKS5_PORT)
     val manualPortsEnabled by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
     val savedServerPeerPort by settingsStore.serverPeerPort.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
@@ -171,11 +174,16 @@ internal fun SettingsTabContent(
     var saveJob by remember { mutableStateOf<Job?>(null) }
     var peerPortSaveJob by remember { mutableStateOf<Job?>(null) }
     var peerPortEdited by rememberSaveable(activeProfile) { mutableStateOf(false) }
+    var proxyPortInput by rememberSaveable(activeProfile) { mutableStateOf(savedProxyPort.toString()) }
     var linkSaveJob by remember { mutableStateOf<Job?>(null) }
     var linkText by remember { mutableStateOf(csqttLink) }
     var loadedLinkMode by remember(activeProfile) { mutableStateOf<Boolean?>(null) }
     var initialized by rememberSaveable(activeProfile) { mutableStateOf(false) }
     val participantMode = loadedLinkMode ?: csqttLinkMode
+
+    LaunchedEffect(savedProxyPort) {
+        if (proxyPortInput.toIntOrNull() != savedProxyPort) proxyPortInput = savedProxyPort.toString()
+    }
 
     val allHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6) {
         listOf(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6)
@@ -708,6 +716,63 @@ internal fun SettingsTabContent(
                         onRevokeToken = { showVkRevokeDialog = true },
                         authorizationRequiredError = hashesRequiredError && autoHashMode,
                     )
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                )
+                CsqttSettingRow(
+                    title = "Безопасное обновление",
+                    description = "Получать актуальные порты и VK-хеши с вашего сервера при подключении",
+                    checked = configSyncEnabled,
+                    onCheckedChange = { enabled ->
+                        scope.launch { settingsStore.saveConfigSyncEnabled(enabled) }
+                    },
+                )
+
+                Spacer(Modifier.height(4.dp))
+
+                CompactDropdownSetting(
+                    title = "Режим подключения",
+                    selectedKey = proxyMode,
+                    options = listOf(
+                        CsqttConstants.Proxy.MODE_VPN to "VPN",
+                        CsqttConstants.Proxy.MODE_SOCKS5 to "SOCKS5",
+                    ),
+                    enabled = !tunnelRunning,
+                    onSelected = { mode -> scope.launch { settingsStore.saveProxyMode(mode) } },
+                )
+                AnimatedVisibility(
+                    visible = proxyMode == CsqttConstants.Proxy.MODE_SOCKS5,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically(),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = proxyPortInput,
+                            onValueChange = { value ->
+                                val normalized = value.filter(Char::isDigit).take(5)
+                                proxyPortInput = normalized
+                                normalized.toIntOrNull()?.takeIf { it in 1..65535 }?.let { port ->
+                                    scope.launch { settingsStore.saveProxyPort(port) }
+                                }
+                            },
+                            label = { Text("Локальный SOCKS5-порт") },
+                            supportingText = {
+                                Text(
+                                    "Укажите 127.0.0.1:${proxyPortInput.ifBlank { savedProxyPort }} в приложении · TCP CONNECT",
+                                )
+                            },
+                            singleLine = true,
+                            enabled = !tunnelRunning,
+                            isError = proxyPortInput.toIntOrNull() !in 1..65535,
+                            shape = CsqttShapes.Control,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(4.dp))

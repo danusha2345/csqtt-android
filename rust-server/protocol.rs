@@ -1869,7 +1869,7 @@ pub async fn compact_memory(app: &Arc<App>) -> Result<bool> {
         .map_err(|_| anyhow!("dataplane stopped before memory compaction"))
 }
 
-fn command(app: &Arc<App>, command_value: ProtocolCommand) -> Result<()> {
+pub(crate) fn command(app: &Arc<App>, command_value: ProtocolCommand) -> Result<()> {
     app.dataplane
         .get()
         .ok_or_else(|| anyhow!("dataplane is not initialized"))?
@@ -3730,6 +3730,7 @@ fn is_control_payload(payload: &[u8]) -> bool {
         || payload.starts_with(b"DISCONNECT:")
         || payload == b"READY"
         || payload.first().is_some_and(|byte| *byte == 0xff)
+        || crate::stream_proxy::is_frame(payload)
 }
 
 #[inline(always)]
@@ -3749,6 +3750,7 @@ fn should_flush_udp_immediately(payload: &[u8]) -> bool {
         || payload == b"READY"
         || payload == b"READY_OK"
         || payload == PANEL_RESTART_NOTICE
+        || crate::stream_proxy::is_frame(payload)
 }
 
 fn session_is_retired_by_epoch(
@@ -3855,6 +3857,7 @@ async fn control_loop(app: Arc<App>, mut receiver: mpsc::Receiver<ControlEvent>)
                 session_id,
                 reason,
             } => {
+                crate::stream_proxy::close_session(&app, session_id);
                 if let Some((_, session)) = app
                     .sessions
                     .remove_if(&session_id, |_, current| current.id == session_id)
@@ -4022,6 +4025,12 @@ async fn process_control_payload(
         app,
         session_id: session.id,
     };
+    if crate::stream_proxy::is_frame(payload) {
+        if !session.has_tunnel.load(Ordering::Acquire) {
+            bail!("proxy requested before authenticated tunnel");
+        }
+        return crate::stream_proxy::handle_frame(app, session.id, payload).await;
+    }
     if payload.starts_with(b"GETCONF:") {
         let text = std::str::from_utf8(payload)?;
         return handle_getconf(app, &writer, session, text).await;
@@ -4046,10 +4055,13 @@ fn getconf_credential_access(
     password: &str,
     device_id: &str,
 ) -> std::result::Result<CredentialAccess, &'static str> {
+    let bound_device = db.devices.get(device_id);
+    if bound_device.is_some_and(|device| {
+        !device.bound_password.is_empty() && device.bound_password != password
+    }) {
+        return Err("DENIED:device_mismatch");
+    }
     if !db.main_password.is_empty() && password == db.main_password {
-        if !db.main_device_id.is_empty() && db.main_device_id != device_id {
-            return Err("DENIED:device_mismatch");
-        }
         return Ok(CredentialAccess::Main);
     }
     let Some(entry) = db.passwords.get(password) else {
@@ -4061,29 +4073,10 @@ fn getconf_credential_access(
     if entry.is_deactivated {
         return Err("DENIED:deactivated");
     }
-    if !entry.device_id.is_empty() && entry.device_id != device_id {
-        return Err("DENIED:device_mismatch");
-    }
-    if let Some(device) = db.devices.get(device_id)
-        && !device.bound_password.is_empty()
-        && device.bound_password != password
-    {
-        let owner_password = &device.bound_password;
-        let owner_claims = if !db.main_password.is_empty() && owner_password == &db.main_password {
-            db.main_device_id == device_id
-        } else {
-            db.passwords
-                .get(owner_password)
-                .is_some_and(|owner| owner.device_id == device_id)
-        };
-        if owner_claims {
-            return Err("DENIED:device_mismatch");
-        }
-    }
-    if entry.device_id.is_empty() {
-        Ok(CredentialAccess::Unbound)
-    } else {
+    if bound_device.is_some_and(|device| device.bound_password == password) {
         Ok(CredentialAccess::Bound)
+    } else {
+        Ok(CredentialAccess::Unbound)
     }
 }
 
@@ -4091,18 +4084,11 @@ fn device_control_authorized(db: &Database, password: &str, device_id: &str) -> 
     if device_id.is_empty() {
         return false;
     }
-    if !db.main_password.is_empty() && password == db.main_password {
-        if !db.main_device_id.is_empty() && db.main_device_id != device_id {
-            return false;
-        }
-        return db.devices.contains_key(device_id);
-    }
-    let password_authorized = db.passwords.get(password).is_some_and(|entry| {
-        !is_expired(entry)
-            && !entry.is_deactivated
-            && !entry.device_id.is_empty()
-            && entry.device_id == device_id
-    });
+    let password_authorized = (!db.main_password.is_empty() && password == db.main_password)
+        || db
+            .passwords
+            .get(password)
+            .is_some_and(|entry| !is_expired(entry) && !entry.is_deactivated);
     password_authorized
         && db
             .devices
@@ -4530,6 +4516,7 @@ async fn handle_getconf(
                     );
                     if access == CredentialAccess::Unbound
                         && let Some(entry) = db.passwords.get_mut(password)
+                        && entry.device_id.is_empty()
                     {
                         entry.device_id = device_id.to_owned();
                         changed = true;
@@ -4986,6 +4973,102 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_client_password_authorizes_multiple_devices() {
+        use crate::model::PasswordEntry;
+
+        let mut db = Database::default();
+        db.passwords.insert(
+            "shared-password".to_owned(),
+            PasswordEntry {
+                device_id: "android-device".to_owned(),
+                ..PasswordEntry::default()
+            },
+        );
+        db.devices.insert(
+            "android-device".to_owned(),
+            ClientDevice {
+                device_id: "android-device".to_owned(),
+                bound_password: "shared-password".to_owned(),
+                ..ClientDevice::default()
+            },
+        );
+
+        assert_eq!(
+            getconf_credential_access(&db, "shared-password", "android-device"),
+            Ok(CredentialAccess::Bound)
+        );
+        assert_eq!(
+            getconf_credential_access(&db, "shared-password", "windows-device"),
+            Ok(CredentialAccess::Unbound)
+        );
+
+        db.devices.insert(
+            "windows-device".to_owned(),
+            ClientDevice {
+                device_id: "windows-device".to_owned(),
+                bound_password: "shared-password".to_owned(),
+                ..ClientDevice::default()
+            },
+        );
+        assert_eq!(
+            getconf_credential_access(&db, "shared-password", "windows-device"),
+            Ok(CredentialAccess::Bound)
+        );
+        assert!(device_control_authorized(
+            &db,
+            "shared-password",
+            "android-device"
+        ));
+        assert!(device_control_authorized(
+            &db,
+            "shared-password",
+            "windows-device"
+        ));
+    }
+
+    #[test]
+    fn main_password_authorizes_multiple_devices_but_cannot_take_another_binding() {
+        let mut db = Database {
+            main_password: "owner-password".to_owned(),
+            main_device_id: "android-device".to_owned(),
+            ..Database::default()
+        };
+        for device_id in ["android-device", "windows-device"] {
+            db.devices.insert(
+                device_id.to_owned(),
+                ClientDevice {
+                    device_id: device_id.to_owned(),
+                    bound_password: "owner-password".to_owned(),
+                    ..ClientDevice::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            getconf_credential_access(&db, "owner-password", "windows-device"),
+            Ok(CredentialAccess::Main)
+        );
+        assert!(device_control_authorized(
+            &db,
+            "owner-password",
+            "windows-device"
+        ));
+
+        db.devices.insert(
+            "linux-device".to_owned(),
+            ClientDevice {
+                device_id: "linux-device".to_owned(),
+                bound_password: "different-password".to_owned(),
+                ..ClientDevice::default()
+            },
+        );
+        assert_eq!(
+            getconf_credential_access(&db, "owner-password", "linux-device"),
+            Err("DENIED:device_mismatch")
+        );
+    }
+
+    #[test]
     fn legacy_json_client_remains_authorized_after_runtime_epoch_reset() {
         use crate::model::{ClientDevice, Database, PasswordEntry, load_database};
 
@@ -5176,6 +5259,7 @@ mod tests {
     #[test]
     fn session_lease_is_control() {
         assert!(is_control_payload(SESSION_LEASE));
+        assert!(is_control_payload(b"CSQPX1\x01\0\0\0\0\0\0\0\x01"));
     }
 
     #[test]
@@ -5183,6 +5267,9 @@ mod tests {
         assert!(should_flush_udp_immediately(b"GETCONF:9000|device"));
         assert!(should_flush_udp_immediately(STREAM_REPAIR_PREFIX));
         assert!(should_flush_udp_immediately(b"READY"));
+        assert!(should_flush_udp_immediately(
+            b"CSQPX1\x04\0\0\0\0\0\0\0\x01data"
+        ));
         assert!(!should_flush_udp_immediately(&[0x45, 0, 0, 28]));
     }
 

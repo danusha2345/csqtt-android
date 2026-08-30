@@ -725,6 +725,13 @@ async fn worker_loop(
         if let Err(error) = &result {
             let message = error.to_string();
             let lower = message.to_ascii_lowercase();
+            if is_permanent_auth_error(&message) {
+                crate::log_error!(
+                    "[ВОРКЕР #{id}] Постоянный отказ авторизации; все повторы остановлены: {message}"
+                );
+                context.cancel.cancel();
+                return;
+            }
             let tcp_stream_reset = context.params.turn_transport == TurnTransportMode::TcpTls
                 && is_remote_tcp_stream_reset(error, &lower);
             if context.params.turn_transport == TurnTransportMode::TcpTls && !tcp_stream_reset {
@@ -828,7 +835,7 @@ async fn worker_loop(
                 if is_transport_timeout(&lower) {
                     context.events.network_timeout();
                 }
-                if message.contains("FATAL_AUTH") || message.contains("хеш мёртв") {
+                if message.contains("хеш мёртв") {
                     delay = Duration::from_secs(5 + rand::random::<u64>() % 6);
                     crate::log_error!(
                         "[ВОРКЕР #{id}] Ошибка авторизации, изолированный повтор через {:?}: {message}",
@@ -876,6 +883,10 @@ async fn worker_loop(
             _ = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+fn is_permanent_auth_error(message: &str) -> bool {
+    message.contains("FATAL_AUTH")
 }
 
 fn worker_retry_delay(attempt: usize) -> Duration {
@@ -1307,6 +1318,21 @@ mod tests {
             assert_eq!(delays[4], Duration::from_millis(4_000 + jitter_ms));
             assert_eq!(delays[31], Duration::from_millis(4_000 + jitter_ms));
         }
+    }
+
+    #[test]
+    fn permanent_server_auth_denials_stop_instead_of_retrying() {
+        for message in [
+            "FATAL_AUTH: неверный пароль подключения",
+            "FATAL_AUTH: срок действия пароля истёк",
+            "FATAL_AUTH: доступ запрещён (deactivated)",
+            "FATAL_AUTH: доступ запрещён (device_mismatch)",
+        ] {
+            assert!(is_permanent_auth_error(message));
+        }
+        assert!(!is_permanent_auth_error("GETCONF timeout после 3 попыток"));
+        assert!(!is_permanent_auth_error("WRAP_AUTH_TIMEOUT"));
+        assert!(!is_permanent_auth_error("хеш мёртв"));
     }
 
     #[test]

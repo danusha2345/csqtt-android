@@ -230,19 +230,19 @@
 
                 <item
                     android:offset="0.0"
-                    android:color="#3DBFFD" />
+                    android:color="#D8B4FE" />
 
                 <item
                     android:offset="0.32"
-                    android:color="#299BFD" />
+                    android:color="#C084FC" />
 
                 <item
                     android:offset="0.66"
-                    android:color="#1475FD" />
+                    android:color="#A855F7" />
 
                 <item
                     android:offset="1.0"
-                    android:color="#0450FC" />
+                    android:color="#7C3AED" />
 
             </gradient>
         </aapt:attr>

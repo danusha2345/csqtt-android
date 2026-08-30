@@ -23,17 +23,18 @@
 
 ## Актуальный релиз
 
-Версия: **2.1.7**. Android package: `csqtt.quic.amurcanov`.
+Версия: **2.1.8**. Android package: `csqtt.quic.amurcanov`.
 
 Каждый пользователь разворачивает собственный сервер и вводит его адрес в формате
 `host:46010`. Адрес и пароль нашей инфраструктуры в Git и Releases не публикуются.
-Для установки на большинство устройств используйте `CSQTT-2.1.7-universal.apk`
+Для установки на большинство устройств используйте `CSQTT-2.1.8-universal.apk`
 из раздела Releases.
 
 ## Возможности
 
 - Android VPN на `arm64-v8a` и `armeabi-v7a`;
 - TURN через UDP или TCP/TLS;
+- режим локального SOCKS5 `CONNECT` на `127.0.0.1` без Android VPN;
 - маскировка `audio` и `video`;
 - ручные и автоматические режимы VK call links/hashes;
 - от 9 до 126 workers;
@@ -41,6 +42,7 @@
 - профили, исключения приложений и системный quick settings tile;
 - Rust server со встроенной web-панелью, SQLite/WAL и управлением клиентами;
 - deploy на VPS через SSH из Android-приложения.
+- защищённое обновление клиентского порта и VK-хешей при подключении и каждые 6 часов.
 
 Подробный список изменений находится в [CHANCHELOG.md](CHANCHELOG.md).
 
@@ -80,6 +82,12 @@ cargo +1.97.1 zigbuild --release --locked --target x86_64-unknown-linux-musl
 
 - `local.properties`, keystore, адреса/пароли частных серверов и VK call links не должны попадать
   в Git или публичные отчёты;
+- SSH host key при первом deploy сохраняется в приватном хранилище приложения; изменение ключа
+  того же `host:port` блокируется как возможная подмена сервера;
+- config sync не передаёт пароль в URL: запрос подписан HMAC, ответ зашифрован AES-256-CTR и
+  защищён отдельным HMAC; ключи выводятся через HKDF из connection password;
+- SOCKS5 слушает только loopback, поддерживает TCP `CONNECT` и удалённый DNS; UDP Associate и
+  доступ к private/link-local адресам VPS намеренно запрещены;
 - сервер создаёт конфигурацию с режимом `0700`, SQLite/WAL/SHM — `0600`;
 - полный TURN e2e требует действующей VK call link/hash;
 - проект предназначен только для некоммерческого использования.
