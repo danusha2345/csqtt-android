@@ -46,8 +46,8 @@ val releaseSigningProblems = mutableListOf<String>().apply {
     if (releaseKeyPassword == null) add("KEY_PASSWORD is not configured")
 }
 val releaseSigningReady = releaseSigningProblems.isEmpty()
-val releaseVersion = "2.1.9"
-val releaseVersionCode = 219
+val releaseVersion = "2.1.10"
+val releaseVersionCode = 220
 
 val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
     group = "verification"
