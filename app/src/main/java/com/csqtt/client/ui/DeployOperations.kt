@@ -560,7 +560,7 @@ private fun isBenignStderr(line: String): Boolean = BENIGN_STDERR.containsMatchI
 
 internal suspend fun performDeploy(
     context: Context,
-    host: String, user: String, pass: String, port: Int,
+    host: String, user: String, pass: String, sudoPass: String, port: Int,
     mainPass: String, webLogin: String, webPass: String,
     peerPort: Int, webPort: Int, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit,
@@ -580,7 +580,7 @@ internal suspend fun performDeploy(
         val initialSsh = createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase)
         ssh = initialSsh
         DeployManager.activeSession = initialSsh
-        val sshClient = DeploySSHClient(initialSsh, pass) { stage ->
+        val sshClient = DeploySSHClient(initialSsh, sudoPass) { stage ->
             TunnelManager.addDeployInfoLog("Повторное SSH-подключение: $stage")
             createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase).also {
                 ssh = it
@@ -708,7 +708,7 @@ internal suspend fun performDeploy(
 
 internal suspend fun performUninstall(
     context: Context,
-    host: String, user: String, pass: String, port: Int,
+    host: String, user: String, pass: String, sudoPass: String, port: Int,
     peerPort: Int,
     onProgress: (Float, String) -> Unit,
     privateKey: String = "",
@@ -723,7 +723,7 @@ internal suspend fun performUninstall(
         TunnelManager.addDeployInfoLog("Подключение к VPS по SSH")
         ssh = createSSHClient(context, host, user, pass, port, privateKey, keyPassphrase)
         DeployManager.activeSession = ssh
-        val sshClient = DeploySSHClient(ssh, pass)
+        val sshClient = DeploySSHClient(ssh, sudoPass)
         TunnelManager.addDeploySuccessLog("SSH-соединение установлено")
 
         onProgress(0.15f, "Остановка сервиса...")

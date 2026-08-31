@@ -123,6 +123,22 @@ internal fun DeployScreen(
                             Spacer(Modifier.width(8.dp))
                             Text("Ключи SSH ${state.sshKeysFilled}/1", fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
                         }
+                        DeployTextField(
+                            value = state.sshPassword,
+                            onValueChange = { onAction(DeployAction.PasswordChanged(it)) },
+                            label = "Пароль sudo (необязательно)",
+                            enabled = !state.isDeploying,
+                            keyboardType = KeyboardType.Password,
+                            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingContent = {
+                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                    Icon(
+                                        imageVector = if (passwordVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                        contentDescription = if (passwordVisible) "Скрыть пароль" else "Показать пароль",
+                                    )
+                                }
+                            },
+                        )
                     } else {
                         DeployTextField(
                             value = state.host,

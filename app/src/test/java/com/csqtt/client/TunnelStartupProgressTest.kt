@@ -16,9 +16,20 @@ class TunnelStartupProgressTest {
         val progress = TunnelStartupProgress()
         assertEquals(TunnelStartupStage.WAITING_FOR_CREDENTIALS, progress.stage())
         assertEquals(1, progress.credentialReceived())
-        assertEquals(TunnelStartupStage.WAITING_FOR_TURN_OR_PEER, progress.stage())
+        assertEquals(TunnelStartupStage.WAITING_FOR_TURN, progress.stage())
+        progress.turnReady()
+        assertEquals(TunnelStartupStage.WAITING_FOR_SERVER_HANDSHAKE, progress.stage())
         progress.streamReady()
         assertEquals(TunnelStartupStage.READY, progress.stage())
+    }
+
+    @Test
+    fun peerHandshakeIsDistinguishedFromTurnAllocation() {
+        val progress = TunnelStartupProgress()
+
+        progress.peerHandshakeStarted()
+
+        assertEquals(TunnelStartupStage.WAITING_FOR_SERVER_HANDSHAKE, progress.stage())
     }
 
     @Test

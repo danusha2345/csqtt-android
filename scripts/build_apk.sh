@@ -21,9 +21,15 @@ if [[ ! -f "app/src/main/jniLibs/armeabi-v7a/libclient.so" ]]; then
 fi
 if [[ "$MISSING" == "1" ]]; then
     echo ""
-    echo "Run build_client.sh first to build all native libraries!"
+    echo "Run scripts/build_android_native.sh first to build and verify all native libraries!"
     exit 1
 fi
+if [[ ! -f "app/src/main/assets/csqtt" ]]; then
+    echo "ERROR: embedded server app/src/main/assets/csqtt not found!" >&2
+    echo "Build rust-server and copy rust-server/dist/csqtt into app/src/main/assets/csqtt." >&2
+    exit 1
+fi
+python3 scripts/native_client_provenance.py verify
 
 echo "Incremental build..."
 echo "Building release APKs..."
@@ -62,7 +68,7 @@ fi
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
     ./gradlew.bat assembleRelease --no-daemon
 else
-    ./gradlew assembleRelease --no-daemon
+    bash gradlew assembleRelease --no-daemon
 fi
 
 mkdir -p app/release

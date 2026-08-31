@@ -1027,10 +1027,17 @@ object TunnelManager {
                     98,
                     true,
                 )
-                TunnelStartupStage.WAITING_FOR_TURN_OR_PEER -> updateProcessLog(
+                TunnelStartupStage.WAITING_FOR_TURN -> updateProcessLog(
                     identity,
                     "startup_waiting_turn",
-                    "[ДИАГНОСТИКА] TURN-креды получены, но ни один allocation/handshake с сервером не завершился",
+                    "[ДИАГНОСТИКА] VK выдал TURN-креды, но TURN allocation не готов: проверьте сеть; при блокировке UDP попробуйте TCP/TLS",
+                    98,
+                    true,
+                )
+                TunnelStartupStage.WAITING_FOR_SERVER_HANDSHAKE -> updateProcessLog(
+                    identity,
+                    "startup_waiting_peer",
+                    "[ДИАГНОСТИКА] TURN готов, но CSQTT server handshake не завершён: проверьте endpoint, порт, пароль, firewall и server logs",
                     98,
                     true,
                 )
@@ -1271,7 +1278,10 @@ object TunnelManager {
                                 turnError -> "turn_error_${text.hashCode()}" to 99
                                 text.contains("CreatePermission", true) -> "turn_permission_status" to 52
                                 text.contains("ChannelBind", true) || text.contains("Канал", true) -> "turn_channel_status" to 53
-                                text.contains("готова к передаче", true) -> "turn_ready_status" to 54
+                                text.contains("готова к передаче", true) -> {
+                                    identity.startupProgress.turnReady()
+                                    "turn_ready_status" to 54
+                                }
                                 text.contains("Refresh", true) -> "turn_refresh_status" to 55
                                 else -> null to 0
                             }
@@ -1279,8 +1289,10 @@ object TunnelManager {
                                 updateProcessLog(identity, stableKey, "[TURN] $text", priority, turnError, if (turnError) LogLevel.ERR else LogLevel.LOG)
                             }
                         }
-                        lineTrim.contains("Рукопожатие...") ->
+                        lineTrim.contains("Рукопожатие...") -> {
+                            identity.startupProgress.peerHandshakeStarted()
                             updateProcessLog(identity, "peer_handshake", "Рукопожатие...", 65, false)
+                        }
 
                         isError -> {
                             val errorKey = when {

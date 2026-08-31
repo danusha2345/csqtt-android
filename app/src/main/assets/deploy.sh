@@ -7,7 +7,7 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TERM="${TERM:-xterm}"
 
-readonly SCRIPT_VERSION="2.1.8"
+readonly SCRIPT_VERSION="2.1.9"
 readonly LOG_FILE="/var/log/csqtt-install.log"
 readonly PEER_PORT="${CSQTT_PEER_PORT:-46010}"
 readonly SSH_PORT="${CSQTT_SSH_PORT:-22}"
@@ -41,7 +41,7 @@ readonly UPLOAD_OVERRIDES_FILE="/tmp/.csqtt-upload-overrides.json"
 readonly CSQTT_SYSCTL_FILE="/etc/sysctl.d/99-csqtt.conf"
 readonly CSQTT_UDP_SYSCTL_FILE="/etc/sysctl.d/99-csqtt-udp-buffers.conf"
 readonly IPT_COMMENT="CSQTT_MANAGED"
-readonly CSQTT_DOCKER_IMAGE="csqtt:2.1.8"
+readonly CSQTT_DOCKER_IMAGE="csqtt:2.1.9"
 readonly CSQTT_DOCKER_CONTAINER="csqtt"
 readonly XT_WAIT="${CSQTT_XT_WAIT:-2}"
 readonly START_STABILITY_SECONDS="${CSQTT_START_STABILITY_SECONDS:-1}"

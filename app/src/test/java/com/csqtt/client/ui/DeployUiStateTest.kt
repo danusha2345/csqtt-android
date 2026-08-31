@@ -49,6 +49,18 @@ class DeployUiStateTest {
     }
 
     @Test
+    fun `ssh key mode allows an optional sudo password`() {
+        val keyState = completeState.copy(
+            sshKeysMode = true,
+            sshKeysFilled = 1,
+            sshPassword = "",
+        )
+
+        assertTrue(keyState.canInstall)
+        assertTrue(keyState.copy(sshPassword = "sudo-secret").canInstall)
+    }
+
+    @Test
     fun `disabling manual ports restores every deployment port default`() {
         val ports = resolveServerPorts(
             manualPorts = false,

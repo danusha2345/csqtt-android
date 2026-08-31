@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [2.1.9] — 2026-08-31
+
+### Исправлено
+
+- В режиме SSH-ключей можно отдельно передать необязательный пароль `sudo`; он больше не обнуляется перед deploy/uninstall.
+- Количество валидных VK-хешей и лимит workers сразу обновляются после изменения результатов проверки.
+- Startup diagnostics различает отсутствие TURN allocation и готовый TURN без CSQTT server handshake; подсказки указывают на UDP/TCP-TLS, endpoint, порт, пароль, firewall и server logs.
+
+### Сборка и проверка
+
+- Release Gradle-задачи fail-closed проверяют обе Android ABI, ELF identity, Cargo outputs, provenance, Cargo manifests/locks, встроенный server binary и deploy markers.
+- Добавлены кроссплатформенный provenance checker и штатная Linux-сборка Android Rust core.
+- Linux APK script проверяет provenance и server asset и больше не ссылается на несуществующий `build_client.sh`.
+- Добавлен GitHub CI для Android unit/lint и Rust fmt/clippy/tests на toolchain 1.97.1.
+
 ## [2.1.8] — 2026-08-30
 
 ### Исправлено

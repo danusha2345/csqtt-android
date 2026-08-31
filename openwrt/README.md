@@ -63,7 +63,7 @@ uname -m
 ```sh
 apk add kmod-tun ip-full iptables-nft
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.8_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.1.9_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -73,7 +73,7 @@ sh /tmp/csqtt-install/install.sh
 ```sh
 opkg update
 opkg install kmod-tun ip-full iptables-nft
-opkg install /tmp/csqtt-client_2.1.8_aarch64_generic.ipk
+opkg install /tmp/csqtt-client_2.1.9_aarch64_generic.ipk
 ```
 
 ## Настройка

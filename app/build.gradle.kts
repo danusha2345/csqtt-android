@@ -46,6 +46,8 @@ val releaseSigningProblems = mutableListOf<String>().apply {
     if (releaseKeyPassword == null) add("KEY_PASSWORD is not configured")
 }
 val releaseSigningReady = releaseSigningProblems.isEmpty()
+val releaseVersion = "2.1.9"
+val releaseVersionCode = 219
 
 val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
     group = "verification"
@@ -61,6 +63,17 @@ val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
     }
 }
 
+val verifyNativeReleaseArtifacts = tasks.register<Exec>("verifyNativeReleaseArtifacts") {
+    group = "verification"
+    description = "Fails release builds unless native client/server artifacts and provenance match the source tree."
+    val python = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "python" else "python3"
+    commandLine(
+        python,
+        rootProject.file("scripts/native_client_provenance.py").absolutePath,
+        "verify-release",
+    )
+}
+
 android {
     namespace = "com.csqtt.client"
     compileSdk = 37
@@ -69,8 +82,8 @@ android {
         applicationId = "csqtt.quic.amurcanov"
         minSdk = 26
         targetSdk = 37
-		versionCode = 218
-		versionName = "2.1.8"
+		versionCode = releaseVersionCode
+		versionName = releaseVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -167,7 +180,7 @@ tasks.configureEach {
             taskName.startsWith("publish") ||
             taskName.startsWith("upload"))
     if (preparesReleaseBuild || producesReleaseArtifact) {
-        dependsOn(verifyReleaseSigning)
+        dependsOn(verifyReleaseSigning, verifyNativeReleaseArtifacts)
     }
 }
 

@@ -193,7 +193,7 @@ internal fun SettingsTabContent(
     }
     val parsedCsqttLink = remember(linkText) { parseCsqttLink(linkText) }
     val linkHashes = parsedCsqttLink?.hashes.orEmpty()
-    val filledHashCount = remember(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6) { uniqueHashes.size }
+    val filledHashCount = uniqueHashes.size
     val combinedHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6) {
         allHashes.filter { it.isNotBlank() && it.length >= 16 }.distinct().joinToString(",")
     }

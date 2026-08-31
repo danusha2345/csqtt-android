@@ -23,11 +23,11 @@
 
 ## Актуальный релиз
 
-Версия: **2.1.8**. Android package: `csqtt.quic.amurcanov`.
+Версия: **2.1.9**. Android package: `csqtt.quic.amurcanov`.
 
 Каждый пользователь разворачивает собственный сервер и вводит его адрес в формате
 `host:46010`. Адрес и пароль нашей инфраструктуры в Git и Releases не публикуются.
-Для установки на большинство устройств используйте `CSQTT-2.1.8-universal.apk`
+Для установки на большинство устройств используйте `CSQTT-2.1.9-universal.apk`
 из раздела Releases.
 
 ## Возможности
@@ -59,7 +59,16 @@ bash gradlew testDebugUnitTest lintDebug lintRelease assembleRelease --no-daemon
 ```
 
 Release-сборка требует явно настроенный keystore и не переходит автоматически на
-debug-подпись. APK создаются в `app/build/outputs/apk/release/`.
+debug-подпись. Перед ней также обязательно должны пройти native provenance gate и
+проверка встроенного server binary. На Linux полный native workflow запускается так:
+
+```bash
+scripts/build_android_native.sh --tests
+cp rust-server/dist/csqtt app/src/main/assets/csqtt
+scripts/build_apk.sh
+```
+
+APK создаются в `app/build/outputs/apk/release/`.
 
 ## Сборка Rust-компонентов
 

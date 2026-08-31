@@ -289,7 +289,7 @@ internal fun DeployTab(
         val deployPrivateKey = if (savedSshKeysMode) savedSshPrivateKey else ""
         val deployKeyPassphrase = if (savedSshKeysMode) savedSshKeyPassphrase else ""
         val deployCertificate = if (savedSshKeysMode) savedSshCertificate else ""
-        val deployPassword = if (savedSshKeysMode) "" else sshPassword
+        val deployAuthPassword = if (savedSshKeysMode) "" else sshPassword
         scope.launch {
             settingsStore.saveDeploy(host, primaryDns, secondaryDns)
             settingsStore.saveDeploySecrets(savedMainPass, sshLogin, sshPassword, savedWebLogin, savedWebPassword)
@@ -303,7 +303,8 @@ internal fun DeployTab(
                     context = context,
                     host = host,
                     user = sshLogin,
-                    pass = deployPassword,
+                    pass = deployAuthPassword,
+                    sudoPass = sshPassword,
                     port = effectiveSshPort,
                     mainPass = savedMainPass,
                     webLogin = savedWebLogin,
@@ -352,7 +353,7 @@ internal fun DeployTab(
         val uninstallPrivateKey = if (savedSshKeysMode) savedSshPrivateKey else ""
         val uninstallKeyPassphrase = if (savedSshKeysMode) savedSshKeyPassphrase else ""
         val uninstallCertificate = if (savedSshKeysMode) savedSshCertificate else ""
-        val uninstallPassword = if (savedSshKeysMode) "" else sshPassword
+        val uninstallAuthPassword = if (savedSshKeysMode) "" else sshPassword
         DeployManager.startDeploy()
         DeployManager.scope.launch {
             try {
@@ -361,7 +362,8 @@ internal fun DeployTab(
                     context = context,
                     host = host,
                     user = sshLogin,
-                    pass = uninstallPassword,
+                    pass = uninstallAuthPassword,
+                    sudoPass = sshPassword,
                     port = effectiveSshPort,
                     peerPort = effectivePeerPort,
                     onProgress = DeployManager::updateProgress,
@@ -524,4 +526,3 @@ internal fun DeployTab(
         DockerInstallInfoDialog(onDismiss = { showDockerInfoDialog = false })
     }
 }
-
