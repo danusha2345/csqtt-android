@@ -43,5 +43,5 @@ jobs:
           java-version: 17
           cache: gradle
       - uses: android-actions/setup-android@v4
-      - run: sdkmanager --channel=3 "platforms;android-37"
+      - run: sdkmanager --channel=3 "platforms;android-37.0"
       - run: bash gradlew testDebugUnitTest lintDebug --no-daemon --console=plain
