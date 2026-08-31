@@ -8,7 +8,7 @@
 
 ### Сборка и проверка
 
-- Android CI переведён на актуальные Node 24-compatible GitHub Actions и устанавливает доступный `platforms;android-37` без несуществующего пакета `build-tools;37.0.0`.
+- Android CI переведён на актуальные Node 24-compatible GitHub Actions и устанавливает preview-платформу `platforms;android-37` из SDK channel 3 без несуществующего пакета `build-tools;37.0.0`.
 - Выпуск использует новый монотонный tag вместо переписывания уже отправленного промежуточного `v2.1.9`.
 
 ## [2.1.9] — 2026-08-31
