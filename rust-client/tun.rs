@@ -129,6 +129,12 @@ pub async fn receive_fd(name: String, cancel: CancellationToken) -> Result<File>
                 match accept(listener.get_ref().as_raw_fd()) {
                     Ok(descriptor) => {
                         let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+                        // Имя abstract-сокета видно всем в /proc/<pid>/cmdline: чужой
+                        // пользователь мог бы успеть подсунуть свой TUN раньше GUI.
+                        if !peer_is_same_user(descriptor.as_raw_fd()) {
+                            crate::log_error!("[TUN] Отклонено подключение другого пользователя к UDS");
+                            continue;
+                        }
                         configure_nonblocking(descriptor.as_raw_fd())?;
                         break descriptor;
                     }
@@ -176,6 +182,28 @@ pub async fn receive_fd(name: String, cancel: CancellationToken) -> Result<File>
     }
 }
 
+/// Принимаем TUN только от процесса того же пользователя (GUI/приложение).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_is_same_user(descriptor: std::os::fd::RawFd) -> bool {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    result == 0 && credentials.uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn peer_is_same_user(_descriptor: std::os::fd::RawFd) -> bool {
+    true
+}
+
 #[cfg(not(unix))]
 pub async fn receive_fd(_name: String, _cancel: CancellationToken) -> Result<File> {
     bail!("TUN FD transport is available only on Android and Unix")
@@ -189,6 +217,14 @@ mod tests {
     fn accepts_openwrt_tun_names() {
         assert!(validate_device_name("csqtt0").is_ok());
         assert!(validate_device_name("vpn-tun.1").is_ok());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn accepts_peer_of_same_user() {
+        use std::os::fd::AsRawFd;
+        let (left, _right) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(super::peer_is_same_user(left.as_raw_fd()));
     }
 
     #[test]
