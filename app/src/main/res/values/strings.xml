@@ -9,7 +9,7 @@
     <string name="nav_connection">Подкл.</string>
     <string name="nav_tunnel">Туннель</string>
     <string name="nav_deploy">Деплой</string>
-    <string name="nav_exceptions">Исключ.</string>
+    <string name="nav_exceptions">Прилож.</string>
     <string name="nav_logs">Логи</string>
 
     <string name="action_clear">Очистить</string>
@@ -23,14 +23,15 @@
 
     <string name="exceptions_search_label">Поиск приложений</string>
     <string name="exceptions_search_placeholder">Название или package name</string>
-    <string name="exceptions_mode_exclude">Чёрный список</string>
-    <string name="exceptions_mode_include">Белый список</string>
-    <string name="exceptions_mode_description_black">Выбранные приложения идут мимо туннеля.</string>
-    <string name="exceptions_mode_description_white">Только выбранные приложения идут через туннель.</string>
+    <string name="exceptions_mode_exclude">Без VPN</string>
+    <string name="exceptions_mode_include">Через VPN</string>
+    <string name="exceptions_mode_description_black">Отметьте приложения, которые должны работать напрямую, без VPN. Остальные приложения используют VPN.</string>
+    <string name="exceptions_mode_description_white">Только отмеченные приложения используют VPN. Остальные работают напрямую.</string>
     <string name="exceptions_system_apps">Системные приложения</string>
     <string name="exceptions_system_apps_description">Показывать системные пакеты в результатах</string>
     <string name="exceptions_loading">Загружаем список приложений…</string>
     <string name="exceptions_empty_title">Ничего не найдено</string>
     <string name="exceptions_empty_description">Измените запрос или включите системные приложения.</string>
     <string name="exceptions_selected_count">Выбрано: %1$d</string>
+    <string name="exceptions_transport_bypass">CSQTT, VK и VK Звонки автоматически работают напрямую и не показаны в списке.</string>
 </resources>

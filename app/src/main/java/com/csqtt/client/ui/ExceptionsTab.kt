@@ -262,6 +262,19 @@ fun ExceptionsTab(
                     }
                 },
             )
+            Text(
+                text = stringResource(
+                    if (isWhitelist) R.string.exceptions_mode_description_white
+                    else R.string.exceptions_mode_description_black,
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = stringResource(R.string.exceptions_transport_bypass),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             CsqttSettingRow(
                 title = stringResource(R.string.exceptions_system_apps),

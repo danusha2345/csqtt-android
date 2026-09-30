@@ -13,3 +13,16 @@ internal fun vkProbeRetryDelayMs(failures: Int): Long = when (failures.coerceAtL
 }
 
 internal fun isVkProbeHttpResponse(code: Int): Boolean = code in 100..599
+
+// Retry only a failed request, and only while the target remains the default network.
+internal fun probeVkWithFallback(
+    bound: () -> Boolean?,
+    isCurrentNetwork: () -> Boolean,
+    unbound: () -> Boolean?,
+): Boolean {
+    val verdict = bound()
+    if (verdict != null) return verdict
+    if (!isCurrentNetwork()) return false
+    val fallback = unbound() ?: false
+    return isCurrentNetwork() && fallback
+}

@@ -14,6 +14,23 @@ use std::{
     },
 };
 
+/// Validate enough IP framing to reject control bytes and truncated datagrams.
+/// Payloads may have trailing padding; the declared IP packet must fit in the buffer.
+pub fn is_ip_packet(packet: &[u8]) -> bool {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            let header = usize::from(packet[0] & 0x0f) * 4;
+            let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+            header >= 20 && header <= total && total <= packet.len()
+        }
+        Some(6) if packet.len() >= 40 => {
+            let payload = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+            40 + payload <= packet.len()
+        }
+        _ => false,
+    }
+}
+
 pub const PACKET_HEADROOM: usize = 64;
 pub const PACKET_CAPACITY: usize = 2304;
 pub const PACKET_POOL_PER_WORKER: usize = 256;
@@ -344,5 +361,29 @@ mod tests {
         for (workers, expected) in [(9, 2_816), (27, 7_424), (108, 28_160), (126, 32_768)] {
             assert_eq!(packet_pool_size(workers), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod ip_validation_tests {
+    use super::is_ip_packet;
+
+    #[test]
+    fn rejects_control_and_truncated_ip_without_rejecting_complete_ip() {
+        for packet in [vec![], vec![0xff], vec![0x55; 60], vec![0x45; 4]] {
+            assert!(!is_ip_packet(&packet));
+        }
+        let mut ipv4 = vec![0; 24];
+        ipv4[0] = 0x45;
+        ipv4[2..4].copy_from_slice(&24u16.to_be_bytes());
+        assert!(is_ip_packet(&ipv4));
+        assert!(!is_ip_packet(&ipv4[..23]));
+        ipv4[0] = 0x4f;
+        assert!(!is_ip_packet(&ipv4));
+        let mut ipv6 = vec![0; 48];
+        ipv6[0] = 0x60;
+        ipv6[4..6].copy_from_slice(&8u16.to_be_bytes());
+        assert!(is_ip_packet(&ipv6));
+        assert!(!is_ip_packet(&ipv6[..47]));
     }
 }

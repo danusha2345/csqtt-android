@@ -23,4 +23,24 @@ class VkNetworkProbePolicyTest {
         assertFalse(isVkProbeHttpResponse(99))
         assertFalse(isVkProbeHttpResponse(600))
     }
+    @Test
+    fun fallbackRunsOnlyForIoFailureOnKnownCurrentNetwork() {
+        var attempts = 0
+        fun unbound(): Boolean { attempts++; return true }
+        assertTrue(probeVkWithFallback({ null }, { true }, ::unbound))
+        assertEquals(1, attempts)
+        for (verdict in listOf(true, false)) {
+            assertEquals(verdict, probeVkWithFallback({ verdict }, { true }, ::unbound))
+        }
+        assertFalse(probeVkWithFallback({ null }, { false }, ::unbound))
+        assertEquals(1, attempts)
+    }
+
+    @Test
+    fun networkChangeDuringFallbackCannotMarkOldNetworkUsable() {
+        var current = true
+        assertFalse(probeVkWithFallback({ null }, { current }, { current = false; true }))
+        assertFalse(probeVkWithFallback({ null }, { true }, { null }))
+    }
+
 }

@@ -768,24 +768,38 @@ class TunnelService : Service() {
     }
 
     private fun probeVkThrough(network: Network): Boolean = VK_PROBE_URLS.any { address ->
-        val connection = runCatching {
-            network.openConnection(URL(address)) as HttpURLConnection
-        }.getOrNull() ?: return@any false
-        try {
-            connection.instanceFollowRedirects = false
-            connection.connectTimeout = VK_PROBE_CONNECT_TIMEOUT_MS
-            connection.readTimeout = VK_PROBE_READ_TIMEOUT_MS
-            connection.useCaches = false
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("Connection", "close")
-            connection.setRequestProperty("Range", "bytes=0-0")
-            connection.setRequestProperty("Accept-Encoding", "identity")
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
-            isVkProbeHttpResponse(connection.responseCode)
+        val url = URL(address)
+        probeVkWithFallback(
+            bound = { probeVkRequest { network.openConnection(url) as HttpURLConnection } },
+            isCurrentNetwork = {
+                runCatching { connectivityManager.activeNetwork == network }.getOrDefault(false)
+            },
+            unbound = { probeVkRequest { url.openConnection() as HttpURLConnection } },
+        )
+    }
+
+    // null means an I/O failure; an HTTP verdict never triggers a fallback.
+    private fun probeVkRequest(open: () -> HttpURLConnection): Boolean? {
+        var connection: HttpURLConnection? = null
+        return try {
+            val request = open()
+            connection = request
+            request.instanceFollowRedirects = false
+            request.connectTimeout = VK_PROBE_CONNECT_TIMEOUT_MS
+            request.readTimeout = VK_PROBE_READ_TIMEOUT_MS
+            request.useCaches = false
+            request.requestMethod = "GET"
+            request.setRequestProperty("Connection", "close")
+            request.setRequestProperty("Range", "bytes=0-0")
+            request.setRequestProperty("Accept-Encoding", "identity")
+            request.setRequestProperty("User-Agent", "Mozilla/5.0")
+            isVkProbeHttpResponse(request.responseCode)
+        } catch (_: java.io.IOException) {
+            null
         } catch (_: Exception) {
             false
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 
