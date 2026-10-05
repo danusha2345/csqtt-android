@@ -338,6 +338,11 @@ impl Dispatcher {
                     return_latency_rx.suspend();
                     return_priority_rx.suspend();
                     return_rx.suspend();
+                    // open() для TUN-устройства не ждёт и не видит отмену: без
+                    // выхода цикл вечно пересоздаёт интерфейс после остановки.
+                    if io_dispatcher.cancel.is_cancelled() {
+                        return;
+                    }
                 }
             });
             dispatcher.tasks.lock().await.push(io_task);

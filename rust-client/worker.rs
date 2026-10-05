@@ -517,6 +517,10 @@ impl GroupCredentials {
             }
             Err(error) => {
                 if let Some(call) = error.downcast_ref::<CallUnavailable>() {
+                    crate::log_error!(
+                        "[КРЕД #{}] Звонок VK недоступен, хеш {short_hash}... отключён: {call}",
+                        self.credential_id
+                    );
                     self.availability.mark_unavailable();
                     self.context.events.call_unavailable(&self.hash, call.code);
                     drop(state);
