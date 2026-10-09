@@ -29,7 +29,7 @@ Package: csqtt-client
 Version: $version
 Architecture: $architecture
 Maintainer: danusha2345
-Depends: libc, kmod-tun, ip-full, iptables-nft
+Depends: libc, kmod-tun, ip-full
 Installed-Size: $installed_size
 Section: net
 Priority: optional

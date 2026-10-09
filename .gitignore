@@ -1,4 +1,5 @@
 .gradle/
+.scratch/
 .kotlin/
 build/
 **/build/

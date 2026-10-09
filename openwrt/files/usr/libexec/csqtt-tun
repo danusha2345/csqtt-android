@@ -8,18 +8,97 @@ config_value() {
 	uci -q get "csqtt.main.$1"
 }
 
-delete_firewall_rules() {
+select_firewall() {
+	if command -v nft >/dev/null 2>&1 && nft list table inet fw4 >/dev/null 2>&1; then
+		firewall=nftables
+	elif command -v fw4 >/dev/null 2>&1; then
+		logger -t csqtt "firewall4 is installed but inet fw4 is unavailable; start firewall first"
+		return 1
+	elif command -v iptables >/dev/null 2>&1; then
+		firewall=iptables
+	else
+		logger -t csqtt "LAN routing requires active nftables/firewall4 or iptables"
+		return 1
+	fi
+	logger -t csqtt "firewall backend: $firewall"
+}
+
+delete_nft_rules() {
+	local chain rules handles handle
+	command -v nft >/dev/null 2>&1 || return 0
+	for chain in forward srcnat; do
+		rules=$(nft -a list chain inet fw4 "$chain" 2>/dev/null) || continue
+		# Цепочка известна; удаляем только нашу метку и текущую пару интерфейсов.
+		handles=$(printf '%s\n' "$rules" | awk -v device="\"$device\"" -v lan="\"$lan\"" -v chain="$chain" '
+			{
+				input = output = comment = handle = ""
+				for (i = 1; i < NF; i++) {
+					if ($i == "iifname") input = $(i + 1)
+					if ($i == "oifname") output = $(i + 1)
+					if ($i == "comment") comment = $(i + 1)
+					if ($i == "handle") handle = $(i + 1)
+				}
+				if (comment == "\"csqtt-openwrt\"" && handle ~ /^[0-9]+$/ &&
+				    ((chain == "srcnat" && output == device) ||
+				     (chain == "forward" && ((input == lan && output == device) ||
+				                             (input == device && output == lan))))) print handle
+			}')
+		for handle in $handles; do
+			nft delete rule inet fw4 "$chain" handle "$handle" || return 1
+		done
+	done
+}
+
+delete_iptables_rules() {
 	local device="$1"
 	local lan="$2"
+	command -v iptables >/dev/null 2>&1 || return 0
 	while iptables -w 5 -C FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
-		iptables -w 5 -D FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT
+		iptables -w 5 -D FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || return 1
 	done
 	while iptables -w 5 -C FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
-		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT
+		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT || return 1
 	done
 	while iptables -w 5 -t nat -C POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE 2>/dev/null; do
-		iptables -w 5 -t nat -D POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE
+		iptables -w 5 -t nat -D POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE || return 1
 	done
+}
+
+delete_firewall_rules() {
+	local result=0
+	delete_nft_rules || result=1
+	delete_iptables_rules "$device" "$lan" || result=1
+	return "$result"
+}
+
+add_firewall_rules() {
+	if [ "$firewall" = nftables ]; then
+		# Один batch: либо установлены все три правила, либо ни одного.
+		nft -f - <<EOF
+insert rule inet fw4 forward meta nfproto ipv4 iifname "$lan" oifname "$device" accept comment "csqtt-openwrt"
+insert rule inet fw4 forward meta nfproto ipv4 iifname "$device" oifname "$lan" ct state established,related accept comment "csqtt-openwrt"
+insert rule inet fw4 srcnat meta nfproto ipv4 oifname "$device" masquerade comment "csqtt-openwrt"
+EOF
+	else
+		iptables -w 5 -I FORWARD 1 -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || return 1
+		iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT || return 1
+		iptables -w 5 -t nat -I POSTROUTING 1 -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE
+	fi
+}
+
+cleanup_network() {
+	local result=0
+	delete_firewall_rules || result=1
+	while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
+	ip -4 route del default dev "$device" table "$table" 2>/dev/null || :
+	ip link set dev "$device" down 2>/dev/null || :
+	return "$result"
+}
+
+rollback_on_failure() {
+	local status=$?
+	if [ "$status" -ne 0 ]; then cleanup_network; fi
+	exit "$status"
 }
 
 device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
@@ -29,28 +108,31 @@ table="$(config_value route_table)"
 [ -n "$device" ] || device=csqtt0
 [ -n "$lan" ] || lan=br-lan
 [ -n "$table" ] || table=$TABLE_DEFAULT
+# Имена попадают в nft batch как строки; не допускаем управляющий синтаксис.
+case "$device:$lan" in
+	*[!a-zA-Z0-9_.:-]*) logger -t csqtt "invalid TUN or LAN interface name"; exit 1 ;;
+esac
 
 case "$1" in
 	up)
 		[ -n "$CSQTT_TUN_IP" ] || { logger -t csqtt "empty tunnel IP"; exit 1; }
+		if [ "$route_lan" = 1 ]; then
+			select_firewall || exit 1
+		fi
+		trap rollback_on_failure 0
 		ip link set dev "$device" mtu 1380 up || exit 1
 		ip -4 address replace "$CSQTT_TUN_IP/32" dev "$device" || exit 1
 		if [ "$route_lan" = 1 ]; then
 			ip -4 route replace default dev "$device" table "$table" || exit 1
 			while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
 			ip -4 rule add priority "$RULE_PRIORITY" iif "$lan" lookup "$table" || exit 1
-			delete_firewall_rules "$device" "$lan"
-			iptables -w 5 -I FORWARD 1 -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
-			iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
-			iptables -w 5 -t nat -I POSTROUTING 1 -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE || exit 1
+			delete_firewall_rules || exit 1
+			add_firewall_rules || exit 1
 		fi
 		logger -t csqtt "configured $device as $CSQTT_TUN_IP/32; DNS $CSQTT_TUN_DNS"
 		;;
 	down)
-		delete_firewall_rules "$device" "$lan"
-		while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
-		ip -4 route del default dev "$device" table "$table" 2>/dev/null
-		ip link set dev "$device" down 2>/dev/null
+		cleanup_network
 		;;
 	*)
 		echo "usage: $0 up|down" >&2

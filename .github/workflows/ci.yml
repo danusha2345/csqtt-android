@@ -37,6 +37,15 @@ jobs:
       - run: bash scripts/test_tunnel_subnet.sh
       - run: python3 scripts/test_release_safety.py
 
+  openwrt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y nftables iptables iproute2 busybox shellcheck
+      - run: shellcheck openwrt/files/usr/libexec/csqtt-tun
+      # В CI root нужен только для создания изолированного network namespace.
+      - run: sudo python3 scripts/test_openwrt_firewall.py --require-netns
+
   rust-server-cross:
     # Статические musl-бинарники для ARM VPS; amd64 собирается тем же скриптом при релизе.
     runs-on: ubuntu-latest

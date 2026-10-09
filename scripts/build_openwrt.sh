@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$repo_dir/rust-client/Cargo.toml" | head -n 1)
+package_release=$(sed -n 's/^PKG_RELEASE:=//p' "$repo_dir/openwrt/Makefile")
+version="$version-$package_release"
 output_dir=${OPENWRT_OUTPUT_DIR:-$repo_dir/target/openwrt-packages}
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_dir/rust-client/target}
 

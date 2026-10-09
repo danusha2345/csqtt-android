@@ -9,6 +9,10 @@ OpenWrt 25.12 и новее используют `apk`, OpenWrt 24.10 и ста�
 Каталог содержит feed-рецепт `Makefile`, поэтому окончательный пакет следует
 создавать SDK именно той версии OpenWrt, которая установлена на роутере.
 
+Текущая ревизия пакетов: **2.1.16-2**, тег `openwrt-v2.1.16-r2`.
+В ней добавлен выбор `nftables`/`iptables`; версия Rust-клиента остаётся 2.1.16.
+Готовые файлы: [OpenWrt 2.1.16-2](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v2.1.16-r2).
+
 ## Сборка пакетов
 
 Нужны Rust 1.97.1, Zig и `cargo-zigbuild`:
@@ -61,9 +65,9 @@ uname -m
 Скопируйте подходящий `.tar.gz` на роутер, например в `/tmp`, затем:
 
 ```sh
-apk add kmod-tun ip-full iptables-nft
+apk add kmod-tun ip-full
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.16_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.1.16-2_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -72,9 +76,34 @@ sh /tmp/csqtt-install/install.sh
 
 ```sh
 opkg update
-opkg install kmod-tun ip-full iptables-nft
-opkg install /tmp/csqtt-client_2.1.16_aarch64_generic.ipk
+opkg install kmod-tun ip-full
+opkg install /tmp/csqtt-client_2.1.16-2_aarch64_generic.ipk
 ```
+
+### Выбор firewall
+
+При `route_lan='1'` hook автоматически выбирает firewall:
+
+- активная таблица `inet fw4` → нативные правила `nftables` в цепочках
+  `forward` и `srcnat`, даже если одновременно установлен `iptables`;
+- без `fw4` → прежние правила `iptables` в `FORWARD` и `POSTROUTING`.
+
+На стандартных образах с `firewall4` нужны работающий сервис firewall и команда
+`nft`, которые обычно уже установлены. `iptables-nft` для этого варианта больше
+не нужен. Если `fw4` установлен, но его таблица недоступна, hook сообщает об
+ошибке и просит сначала запустить firewall; переключения на `iptables` нет.
+Для старых или нестандартных образов с `firewall3` сохраните установленный
+`iptables` с поддержкой `comment`, `conntrack` и `MASQUERADE`.
+Пакет CSQTT не устанавливает и не заменяет firewall роутера.
+
+Выбор определяется фактическим firewall, а не номером OpenWrt:
+[firewall4 используется по умолчанию начиная с 22.03](https://openwrt.org/docs/guide-user/firewall/firewall_configuration).
+Для SOCKS5 и TUN с `route_lan='0'` firewall-команды не нужны.
+
+Правила относятся только к IPv4, как и текущий TUN. Повторный `up` удаляет
+собственные старые правила, а ошибка настройки откатывает policy route и
+частично добавленные правила. Перезапуск firewall удаляет динамические правила
+CSQTT: после него выполните `/etc/init.d/csqtt restart`.
 
 ## Настройка
 
@@ -116,6 +145,10 @@ MASQUERADE, а при остановке удаляет только созда�
 ip link show csqtt0
 ip rule show | grep 12000
 ip route show table 202
+# nftables / firewall4:
+nft -a list chain inet fw4 forward | grep csqtt-openwrt
+nft -a list chain inet fw4 srcnat | grep csqtt-openwrt
+# Или iptables / firewall3:
 iptables -S FORWARD | grep csqtt0
 iptables -t nat -S POSTROUTING | grep csqtt0
 ```
@@ -123,6 +156,17 @@ iptables -t nat -S POSTROUTING | grep csqtt0
 Полная готовность конкретной модели подтверждается только тестом на реальном
 OpenWrt-устройстве: старт после reboot, доступ LAN через туннель, отсутствие
 утечки пароля в `ps`, восстановление после обрыва и корректная остановка.
+
+Локальные регрессии hook запускаются на Linux с `nft`, `iptables`, `ip`,
+BusyBox и поддержкой user/network namespaces:
+
+```sh
+python3 scripts/test_openwrt_firewall.py --require-netns
+shellcheck openwrt/files/usr/libexec/csqtt-tun
+```
+
+Тесты применяют настоящие правила в отдельном network namespace и не меняют
+сеть хоста. Проверяется также BusyBox `sh`; это не заменяет прогон на роутере.
 
 ## Помогите протестировать beta
 

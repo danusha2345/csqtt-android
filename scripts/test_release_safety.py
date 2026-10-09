@@ -51,10 +51,14 @@ class ReleaseSafetyTests(unittest.TestCase):
             control = subprocess.check_output(['ar', 'p', ipk, 'control.tar.gz'])
             with tarfile.open(fileobj=io.BytesIO(control), mode='r:gz') as archive:
                 self.assertEqual(archive.extractfile('./conffiles').read(), b'/etc/config/csqtt\n')
+                self.assertIn(b'Depends: libc, kmod-tun, ip-full\n',
+                              archive.extractfile('./control').read())
             data = subprocess.check_output(['ar', 'p', ipk, 'data.tar.gz'])
             with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
                 self.assertEqual(archive.getmember('./etc/config/csqtt').mode, 0o600)
                 self.assertEqual(archive.getmember('./usr/bin/csqtt-client').mode, 0o755)
+                self.assertEqual(archive.extractfile('./usr/libexec/csqtt-tun').read(),
+                                 (ROOT / 'openwrt/files/usr/libexec/csqtt-tun').read_bytes())
 
     def test_reports_do_not_collect_secret_sources(self):
         with tempfile.TemporaryDirectory() as tmp:

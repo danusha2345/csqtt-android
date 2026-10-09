@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=csqtt-client
 PKG_VERSION:=2.1.16
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -11,7 +11,7 @@ define Package/csqtt-client
   CATEGORY:=Network
   TITLE:=CSQTT client for OpenWrt routers
   URL:=https://github.com/danusha2345/csqtt-android
-  DEPENDS:=+libc +kmod-tun +ip-full +iptables-nft
+  DEPENDS:=+libc +kmod-tun +ip-full
 endef
 
 define Package/csqtt-client/description
