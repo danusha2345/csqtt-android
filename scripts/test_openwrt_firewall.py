@@ -22,6 +22,9 @@ if REQUIRE_NETNS:
 class OpenWrtFirewallTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Root уже имеет CAP_NET_ADMIN; новый user namespace лишает его доступа
+        # к каталогам runner с правами 0700 и владельцем вне uid_map.
+        cls.namespace_flags = ['-n'] if os.geteuid() == 0 else ['-Urn']
         cls.commands = {name: shutil.which(name) for name in
                         ('unshare', 'sh', 'ip', 'nft', 'iptables', 'awk', 'busybox')}
         missing = [name for name, path in cls.commands.items() if not path]
@@ -29,7 +32,7 @@ class OpenWrtFirewallTests(unittest.TestCase):
             reason = 'Нет инструментов: ' + ', '.join(missing)
         else:
             probe = subprocess.run(
-                [cls.commands['unshare'], '-Urn', cls.commands['sh'], '-ec',
+                [cls.commands['unshare'], *cls.namespace_flags, cls.commands['sh'], '-ec',
                  'nft add table inet probe; ip link add probe0 type dummy; '
                  'XTABLES_LOCKFILE=/dev/null iptables -t nat -S'],
                 capture_output=True, text=True, timeout=15)
@@ -102,7 +105,7 @@ test "$(nft -a list table inet fw4 | awk '/comment "csqtt-openwrt"/ {n++} END {p
 test "$(nft list table inet fw4 | awk '/comment "unrelated"/ {n++} END {print n+0}')" = 1
 }
 '''
-        result = subprocess.run([self.commands['unshare'], '-Urn', self.commands['sh'],
+        result = subprocess.run([self.commands['unshare'], *self.namespace_flags, self.commands['sh'],
                                  '-euxc', setup + body], env=self.env, text=True,
                                 capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
