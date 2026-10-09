@@ -9,9 +9,9 @@ OpenWrt 25.12 и новее используют `apk`, OpenWrt 24.10 и ста�
 Каталог содержит feed-рецепт `Makefile`, поэтому окончательный пакет следует
 создавать SDK именно той версии OpenWrt, которая установлена на роутере.
 
-Текущая ревизия пакетов: **2.1.16-2**, тег `openwrt-v2.1.16-r2`.
-В ней добавлен выбор `nftables`/`iptables`; версия Rust-клиента остаётся 2.1.16.
-Готовые файлы: [OpenWrt 2.1.16-2](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v2.1.16-r2).
+Текущая ревизия пакетов: **2.1.17-1**, тег `v2.1.17`.
+В ней добавлен выбор `nftables`/`iptables`; версия Rust-клиента — 2.1.17.
+Готовые файлы: [OpenWrt 2.1.17-1](https://github.com/danusha2345/csqtt-android/releases/tag/v2.1.17).
 
 ## Сборка пакетов
 
@@ -67,7 +67,7 @@ uname -m
 ```sh
 apk add kmod-tun ip-full
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.16-2_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.1.17-1_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -77,7 +77,7 @@ sh /tmp/csqtt-install/install.sh
 ```sh
 opkg update
 opkg install kmod-tun ip-full
-opkg install /tmp/csqtt-client_2.1.16-2_aarch64_generic.ipk
+opkg install /tmp/csqtt-client_2.1.17-1_aarch64_generic.ipk
 ```
 
 ### Выбор firewall

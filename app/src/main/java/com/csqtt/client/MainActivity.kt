@@ -569,7 +569,6 @@ fun MainScreen(
                         action = UPDATE_DIALOG_ACTION_UPDATE,
                         actedAt = System.currentTimeMillis()
                     )
-                    openReleaseUrl(context, release.releaseUrl)
                 }
             }
         )
@@ -717,16 +716,5 @@ private fun ProxyNavigationBar(
                 }
             }
         }
-    }
-}
-
-private fun openReleaseUrl(context: Context, url: String) {
-    try {
-        val intent = Intent(Intent.ACTION_VIEW, url.toUri()).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-        }
-        context.startActivity(intent)
-    } catch (_: Exception) {
-        context.showRaisedToast("Не удалось открыть ссылку", Toast.LENGTH_SHORT)
     }
 }
