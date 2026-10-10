@@ -57,6 +57,12 @@ csqtt.main.tun_device) echo csqtt0 ;;
 csqtt.main.lan_device) echo br-lan ;;
 csqtt.main.route_lan) echo "${ROUTE_LAN:-1}" ;;
 csqtt.main.route_table) echo 202 ;;
+csqtt.main.route_mode) echo "${ROUTE_MODE:-}" ;;
+csqtt.main.route_net) echo "${ROUTE_NET:-}" ;;
+csqtt.main.route_nets_file) echo "${ROUTE_NETS_FILE:-}" ;;
+csqtt.main.route_private) echo "${ROUTE_PRIVATE:-}" ;;
+csqtt.main.firewall) echo "${FIREWALL_MODE:-}" ;;
+firewall) [ "$2" = show ] && printf '%s\n' "${FIREWALL_SHOW:-}" ;;
 *) exit 1 ;;
 esac
 ''')
@@ -99,6 +105,9 @@ nft 'add rule inet fw4 forward counter comment "unrelated"'
         setup += '''assert_routes() {
 test "$(ip -4 rule show | awk '/12000:.*iif br-lan.*lookup 202/ {n++} END {print n+0}')" = "$1"
 test "$(ip -4 route show table all | awk '/default dev csqtt0 table 202/ {n++} END {print n+0}')" = "$1"
+}
+assert_table() {
+test "$(ip -4 route show table 202 | awk '{$1=$1; print}' | busybox sort | busybox tr '\\n' ';')" = "$1"
 }
 assert_nft_rules() {
 test "$(nft -a list table inet fw4 | awk '/comment "csqtt-openwrt"/ {n++} END {print n+0}')" = "$1"
@@ -234,6 +243,91 @@ test "$(nft list table inet fw4 | awk '/csqtt-openwrt-other/ {n++} END {print n+
     def test_stop_after_firewall_reload(self):
         self.backend()
         self.run_namespace('hook up\nnft delete table inet fw4\nhook down\nassert_routes 0\n')
+
+    def test_exclude_mode_throws_private_and_listed_networks(self):
+        self.backend()
+        self.env['ROUTE_NET'] = '203.0.113.0/24 198.51.100.7'
+        self.run_namespace('''hook up
+assert_routes 1
+assert_table 'default dev csqtt0 scope link;throw 10.0.0.0/8;throw 169.254.0.0/16;throw 172.16.0.0/12;throw 192.168.0.0/16;throw 198.51.100.7;throw 203.0.113.0/24;'
+hook down
+assert_table ''
+''', shell='busybox')
+
+    def test_exclude_mode_without_private_throws(self):
+        self.backend()
+        self.env['ROUTE_PRIVATE'] = '0'
+        self.run_namespace("hook up\nassert_table 'default dev csqtt0 scope link;'\nhook down\n")
+
+    def test_include_mode_routes_only_listed_networks(self):
+        self.backend()
+        nets_file = self.directory / 'nets.txt'
+        nets_file.write_text('# comment\n\n203.0.113.0/24  # trailing\n  198.51.100.0/25\n')
+        self.env.update(ROUTE_MODE='include', ROUTE_NET='192.0.2.0/24', ROUTE_NETS_FILE=str(nets_file))
+        self.run_namespace('''hook up
+hook up
+test "$(ip -4 rule show | awk '/12000:.*iif br-lan.*lookup 202/ {n++} END {print n+0}')" = 1
+assert_table '192.0.2.0/24 dev csqtt0 scope link;198.51.100.0/25 dev csqtt0 scope link;203.0.113.0/24 dev csqtt0 scope link;'
+assert_nft_rules 3
+hook down
+assert_table ''
+assert_routes 0
+assert_nft_rules 0
+''', shell='busybox')
+
+    def test_include_mode_with_empty_list_bypasses_tunnel(self):
+        self.backend()
+        self.env['ROUTE_MODE'] = 'include'
+        log = self.run_namespace('''hook up
+assert_table ''
+test "$(ip -4 rule show | awk '/12000:.*iif br-lan.*lookup 202/ {n++} END {print n+0}')" = 1
+assert_nft_rules 3
+hook down
+''')
+        self.assertIn('LAN bypasses the tunnel', log)
+
+    def test_invalid_network_rolls_back(self):
+        self.backend()
+        self.env.update(ROUTE_MODE='include', ROUTE_NET='203.0.113.0/24 not-a-network')
+        self.run_namespace("if hook up; then exit 1; fi\nassert_table ''\nassert_routes 0\nassert_nft_rules 0\n")
+
+    def test_missing_nets_file_and_bad_mode_fail(self):
+        self.backend()
+        self.env['ROUTE_NETS_FILE'] = str(self.directory / 'missing.txt')
+        log = self.run_namespace("if hook up; then exit 1; fi\nassert_table ''\n")
+        self.assertIn('cannot read route_nets_file', log)
+        del self.env['ROUTE_NETS_FILE']
+        self.env['ROUTE_MODE'] = 'both'
+        log = self.run_namespace("if hook up; then exit 1; fi\nassert_table ''\n")
+        self.assertIn('route_mode must be', log)
+
+    def test_zone_mode_needs_no_backend_and_removes_stale_rules(self):
+        self.backend(nft=False, fw4=False)
+        self.env.update(FIREWALL_MODE='zone',
+                        FIREWALL_SHOW="firewall.@zone[1].name='wan'\nfirewall.@zone[1].device='eth1' 'csqtt0'")
+        log = self.run_namespace('''hook up
+assert_routes 1
+hook down
+assert_routes 0
+''', fw4=False, shell='busybox')
+        self.assertNotIn('firewall backend', log)
+        self.assertNotIn('not a device of any firewall zone', log)
+        self.backend()
+        self.env['FIREWALL_SHOW'] = "firewall.@zone[1].device='csqtt01'"
+        log = self.run_namespace('''nft 'add rule inet fw4 forward iifname "br-lan" oifname "csqtt0" accept comment "csqtt-openwrt"'
+hook up
+assert_nft_rules 0
+assert_routes 1
+hook down
+assert_routes 0
+''')
+        self.assertIn('csqtt0 is not a device of any firewall zone', log)
+
+    def test_bad_firewall_mode_fails(self):
+        self.backend()
+        self.env['FIREWALL_MODE'] = 'static'
+        log = self.run_namespace("if hook up; then exit 1; fi\nassert_routes 0\n")
+        self.assertIn('firewall must be', log)
 
     def test_unsafe_interface_rejected_before_nft_batch(self):
         self.backend()

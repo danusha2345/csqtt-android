@@ -86,11 +86,51 @@ EOF
 	fi
 }
 
+# Режим zone: правила forward/masquerade задаёт /etc/config/firewall, hook их не создаёт.
+warn_if_not_in_zone() {
+	uci -q show firewall | awk -v device="'$device'" \
+		'index($0, ".device=") && index($0, device) { found = 1 } END { exit !found }' ||
+		logger -t csqtt "$device is not a device of any firewall zone; LAN forwarding will be blocked"
+}
+
+read_route_nets() {
+	local line word
+	nets="$(config_value route_net)"
+	[ -n "$nets_file" ] || return 0
+	[ -r "$nets_file" ] || { logger -t csqtt "cannot read route_nets_file $nets_file"; return 1; }
+	while IFS= read -r line || [ -n "$line" ]; do
+		for word in ${line%%#*}; do nets="$nets $word"; done
+	done <"$nets_file"
+}
+
+# exclude: default в туннель, throw для исключений; include: маршруты только для списка.
+fill_route_table() {
+	local net
+	read_route_nets || return 1
+	if [ "$route_mode" = include ]; then
+		[ -n "$nets" ] || logger -t csqtt "route_mode=include without networks: LAN bypasses the tunnel"
+	else
+		ip -4 route replace default dev "$device" table "$table" || return 1
+		if [ "$route_private" != 0 ]; then
+			for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+				ip -4 route replace throw "$net" table "$table" || return 1
+			done
+		fi
+	fi
+	for net in $nets; do
+		if [ "$route_mode" = include ]; then
+			ip -4 route replace "$net" dev "$device" table "$table" || return 1
+		else
+			ip -4 route replace throw "$net" table "$table" || return 1
+		fi
+	done
+}
+
 cleanup_network() {
 	local result=0
 	delete_firewall_rules || result=1
 	while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
-	ip -4 route del default dev "$device" table "$table" 2>/dev/null || :
+	ip -4 route flush table "$table" 2>/dev/null || :
 	ip link set dev "$device" down 2>/dev/null || :
 	return "$result"
 }
@@ -105,9 +145,23 @@ device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
 lan="$(config_value lan_device)"
 route_lan="$(config_value route_lan)"
 table="$(config_value route_table)"
+route_mode="$(config_value route_mode)"
+route_private="$(config_value route_private)"
+nets_file="$(config_value route_nets_file)"
+firewall_mode="$(config_value firewall)"
 [ -n "$device" ] || device=csqtt0
 [ -n "$lan" ] || lan=br-lan
 [ -n "$table" ] || table=$TABLE_DEFAULT
+[ -n "$route_mode" ] || route_mode=exclude
+case "$route_mode" in
+	exclude|include) ;;
+	*) logger -t csqtt "route_mode must be exclude or include"; exit 1 ;;
+esac
+[ -n "$firewall_mode" ] || firewall_mode=dynamic
+case "$firewall_mode" in
+	dynamic|zone) ;;
+	*) logger -t csqtt "firewall must be dynamic or zone"; exit 1 ;;
+esac
 # Имена попадают в nft batch как строки; не допускаем управляющий синтаксис.
 case "$device:$lan" in
 	*[!a-zA-Z0-9_.:-]*) logger -t csqtt "invalid TUN or LAN interface name"; exit 1 ;;
@@ -116,18 +170,22 @@ esac
 case "$1" in
 	up)
 		[ -n "$CSQTT_TUN_IP" ] || { logger -t csqtt "empty tunnel IP"; exit 1; }
-		if [ "$route_lan" = 1 ]; then
+		if [ "$route_lan" = 1 ] && [ "$firewall_mode" = dynamic ]; then
 			select_firewall || exit 1
 		fi
 		trap rollback_on_failure 0
 		ip link set dev "$device" mtu 1380 up || exit 1
 		ip -4 address replace "$CSQTT_TUN_IP/32" dev "$device" || exit 1
 		if [ "$route_lan" = 1 ]; then
-			ip -4 route replace default dev "$device" table "$table" || exit 1
+			fill_route_table || exit 1
 			while ip -4 rule del priority "$RULE_PRIORITY" iif "$lan" lookup "$table" 2>/dev/null; do :; done
 			ip -4 rule add priority "$RULE_PRIORITY" iif "$lan" lookup "$table" || exit 1
 			delete_firewall_rules || exit 1
-			add_firewall_rules || exit 1
+			if [ "$firewall_mode" = dynamic ]; then
+				add_firewall_rules || exit 1
+			else
+				warn_if_not_in_zone
+			fi
 		fi
 		logger -t csqtt "configured $device as $CSQTT_TUN_IP/32; DNS $CSQTT_TUN_DNS"
 		;;

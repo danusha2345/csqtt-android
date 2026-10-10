@@ -9,9 +9,9 @@ OpenWrt 25.12 и новее используют `apk`, OpenWrt 24.10 и ста�
 Каталог содержит feed-рецепт `Makefile`, поэтому окончательный пакет следует
 создавать SDK именно той версии OpenWrt, которая установлена на роутере.
 
-Текущая ревизия пакетов: **2.1.17-1**, тег `v2.1.17`.
-В ней добавлен выбор `nftables`/`iptables`; версия Rust-клиента — 2.1.17.
-Готовые файлы: [OpenWrt 2.1.17-1](https://github.com/danusha2345/csqtt-android/releases/tag/v2.1.17).
+Текущая ревизия пакетов: **2.1.17-2**, тег `openwrt-v2.1.17-r2`.
+В ней добавлены режимы маршрутизации по списку сетей и вариант с зоной `wan`; версия Rust-клиента — 2.1.17.
+Готовые файлы: [OpenWrt 2.1.17-2](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v2.1.17-r2).
 
 ## Сборка пакетов
 
@@ -67,7 +67,7 @@ uname -m
 ```sh
 apk add kmod-tun ip-full
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.17-1_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.1.17-2_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -77,12 +77,12 @@ sh /tmp/csqtt-install/install.sh
 ```sh
 opkg update
 opkg install kmod-tun ip-full
-opkg install /tmp/csqtt-client_2.1.17-1_aarch64_generic.ipk
+opkg install /tmp/csqtt-client_2.1.17-2_aarch64_generic.ipk
 ```
 
 ### Выбор firewall
 
-При `route_lan='1'` hook автоматически выбирает firewall:
+При `route_lan='1'` и `firewall='dynamic'` (по умолчанию) hook автоматически выбирает firewall:
 
 - активная таблица `inet fw4` → нативные правила `nftables` в цепочках
   `forward` и `srcnat`, даже если одновременно установлен `iptables`;
@@ -95,6 +95,26 @@ opkg install /tmp/csqtt-client_2.1.17-1_aarch64_generic.ipk
 Для старых или нестандартных образов с `firewall3` сохраните установленный
 `iptables` с поддержкой `comment`, `conntrack` и `MASQUERADE`.
 Пакет CSQTT не устанавливает и не заменяет firewall роутера.
+
+#### Вариант без динамических правил: зона `wan`
+
+Правила, которые добавляет hook, пропадают после перезапуска firewall. Чтобы
+этого избежать, добавьте `csqtt0` в зону `wan` и включите `firewall='zone'`.
+Тогда hook настраивает только маршруты, а forward и masquerade делает сам
+firewall. Заодно зона `wan` режет MSS под MTU туннеля и закрывает вход из него.
+
+Узнайте номер зоны `wan` командой `uci show firewall | grep name`, затем:
+
+```sh
+uci set csqtt.main.firewall='zone'
+uci add_list firewall.@zone[1].device='csqtt0'
+uci commit
+/etc/init.d/firewall reload
+/etc/init.d/csqtt restart
+```
+
+Если `csqtt0` нет ни в одной зоне, hook напишет об этом в `logread`, а трафик
+из LAN не пойдёт. Старые правила CSQTT hook убирает при старте в любом режиме.
 
 Выбор определяется фактическим firewall, а не номером OpenWrt:
 [firewall4 используется по умолчанию начиная с 22.03](https://openwrt.org/docs/guide-user/firewall/firewall_configuration).
@@ -130,6 +150,23 @@ logread -e csqtt
 - `mode='tun'` создаёт `csqtt0`. При `route_lan='1'` трафик, пришедший с
   `lan_device` (по умолчанию `br-lan`), направляется в отдельную таблицу 202;
   локальный трафик самого роутера остаётся на обычном WAN и не зацикливает TURN.
+- `route_mode='exclude'` (по умолчанию): весь LAN идёт в туннель, кроме сетей из
+  списка. Локальные сети (10/8, 172.16/12, 192.168/16, 169.254/16) тоже идут
+  мимо туннеля; чтобы они шли в туннель, поставьте `route_private='0'`.
+- `route_mode='include'`: в туннель идут только сети из списка. Пустой список
+  означает, что весь LAN идёт мимо туннеля.
+- Список задаётся через `list route_net` и/или файл `route_nets_file`: одна
+  сеть на строку, `#` начинает комментарий. Неверная запись или отсутствующий
+  файл останавливают запуск. После правки списка перезапустите сервис.
+
+```sh
+uci set csqtt.main.route_mode='include'
+uci add_list csqtt.main.route_net='203.0.113.0/24'
+uci add_list csqtt.main.route_net='198.51.100.0/25'
+uci commit csqtt
+/etc/init.d/csqtt restart
+```
+
 - `mode='socks5'` поднимает прокси на `socks5_listen` без изменения маршрутов.
   По умолчанию он слушает только `127.0.0.1:1080`; менять адрес на LAN следует
   только вместе с отдельными firewall-ограничениями.
@@ -191,5 +228,5 @@ VK-хеши публиковать нельзя.
 /etc/init.d/csqtt disable
 ```
 
-Сервис удалит созданные им policy rule, default route таблицы CSQTT и firewall
+Сервис удалит созданные им policy rule, маршруты таблицы CSQTT и firewall
 rules. Конфигурация и бинарник останутся на месте для последующего запуска.

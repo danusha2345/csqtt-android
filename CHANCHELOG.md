@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [OpenWrt 2.1.17-2] — 2026-10-10
+
+- OpenWrt: `route_mode='exclude'` (по умолчанию) пускает весь LAN в туннель,
+  кроме сетей из списка; `route_mode='include'` — только сети из списка.
+  Список: `list route_net` и/или файл `route_nets_file`.
+- OpenWrt: локальные сети больше не попадают в туннель (`route_private='1'`).
+- OpenWrt: `firewall='zone'` — правила делает сам firewall, если `csqtt0` добавлен
+  в зону `wan`; они не пропадают после перезапуска firewall.
+- Rust-клиент, Android, сервер и desktop не менялись.
+
 ## [2.1.17] — 2026-10-09
 
 - Android: отдельный package ID `io.github.danusha2345.csqtt` для установки рядом
