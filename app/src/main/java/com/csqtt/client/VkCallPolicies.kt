@@ -3,6 +3,8 @@
 
 package com.csqtt.client
 
+import kotlinx.coroutines.delay
+
 internal class VkRequestPacer(
     private val intervalMs: Long,
     private val nowMs: () -> Long,
@@ -26,7 +28,12 @@ internal suspend fun <T> runVkCallAttempts(
         attempts++
         result = request()
         if (result is VkApiResult.Ok<*>) break
-        if (result is VkApiResult.ApiError && VkApi.isTokenInvalid(result)) break
+        if (result is VkApiResult.ApiError) {
+            if (VkApi.isTokenInvalid(result)) break
+            if (result.code == 6) {
+                delay(1000L)
+            }
+        }
     }
     return result
 }

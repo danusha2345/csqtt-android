@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.ui.design.CsqttShapes
 import com.csqtt.client.ui.design.CsqttSizes
@@ -70,7 +71,13 @@ fun <T> CsqttSegmentedControl(
                         )
                         androidx.compose.foundation.layout.Spacer(Modifier.width(CsqttSpacing.Xxs))
                     }
-                    Text(text = label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

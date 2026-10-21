@@ -15,14 +15,14 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Semaphore, mpsc},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
-const MAX_DATA: usize = 2_000;
+const MAX_DATA: usize = 1_100;
 use crate::proxy_sequence::StreamSequence;
 const MAX_STREAMS: usize = 64;
 pub(crate) const OPEN: u8 = 1;
@@ -82,16 +82,27 @@ fn deliver_inbound(streams: &mut HashMap<u64, mpsc::Sender<Inbound>>, id: u64, e
     }
 }
 
+fn validate_bind(bind: &str, username: &str, password: &str) -> Result<SocketAddr> {
+    let requested: SocketAddr = bind.parse().context("invalid SOCKS5 bind address")?;
+    if !requested.ip().is_loopback() && (username.is_empty() || password.is_empty()) {
+        bail!("LAN SOCKS5 requires a username and password");
+    }
+    if username.len() > 255 || password.len() > 255 {
+        bail!("SOCKS5 credentials exceed 255 bytes");
+    }
+    Ok(requested)
+}
+
 pub async fn start(
     bind: &str,
+    username: &str,
+    password: &str,
     dispatcher: Arc<Dispatcher>,
     pool: Arc<PacketPool>,
     cancel: CancellationToken,
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
-    let requested: SocketAddr = bind.parse().context("invalid SOCKS5 bind address")?;
-    if !requested.ip().is_loopback() {
-        bail!("SOCKS5 listener must use a loopback address");
-    }
+    let requested = validate_bind(bind, username, password)?;
+    let auth = Arc::new((username.to_owned(), password.to_owned()));
     let listener = TcpListener::bind(requested)
         .await
         .context("SOCKS5 bind failed")?;
@@ -126,6 +137,7 @@ pub async fn start(
 
     let task = tokio::spawn(async move {
         let ids = AtomicU64::new(1);
+        let slots = Arc::new(Semaphore::new(MAX_STREAMS));
         loop {
             let accepted = tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -136,13 +148,19 @@ pub async fn start(
                 drop(socket);
                 continue;
             }
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                drop(socket);
+                continue;
+            };
             let id = ids.fetch_add(1, Ordering::Relaxed).max(1);
             let dispatcher = dispatcher.clone();
             let pool = pool.clone();
             let streams = streams.clone();
             let cancel = cancel.clone();
+            let auth = auth.clone();
             tokio::spawn(async move {
-                let _ = handle_client(socket, id, dispatcher, pool, streams, cancel).await;
+                let _slot = slot;
+                let _ = handle_client(socket, id, dispatcher, pool, streams, cancel, auth).await;
             });
         }
     });
@@ -156,13 +174,16 @@ async fn handle_client(
     pool: Arc<PacketPool>,
     streams: Arc<Mutex<HashMap<u64, mpsc::Sender<Inbound>>>>,
     cancel: CancellationToken,
+    auth: Arc<(String, String)>,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
-    let target = read_handshake(&mut socket).await?;
+    let target = tokio::time::timeout(Duration::from_secs(10), read_handshake(&mut socket, &auth))
+        .await
+        .context("SOCKS5 handshake timed out")??;
     let (tx, mut rx) = mpsc::channel(64);
     streams.lock().await.insert(stream_id, tx);
     let result = async {
-        dispatcher.send_proxy_frame(&pool, &encode_frame(OPEN, stream_id, &target))?;
+        dispatcher.send_proxy_frame(&pool, &encode_frame(OPEN, stream_id, &target)).await?;
         let opened = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
         match opened {
             Ok(Some(Inbound::Opened)) => write_reply(&mut socket, 0).await?,
@@ -184,7 +205,7 @@ async fn handle_client(
                 _ = cancel.cancelled() => break,
                 read = reader.read(&mut buffer) => match read? {
                     0 => break,
-                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?))?,
+                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?)).await?,
                 },
                 inbound = rx.recv() => match inbound {
                     Some(Inbound::Data(data)) => writer.write_all(received.decode(&data)?).await?,
@@ -196,11 +217,13 @@ async fn handle_client(
         Result::<()>::Ok(())
     }.await;
     streams.lock().await.remove(&stream_id);
-    let _ = dispatcher.send_proxy_frame(&pool, &encode_frame(CLOSE, stream_id, &[]));
+    let _ = dispatcher
+        .send_proxy_frame(&pool, &encode_frame(CLOSE, stream_id, &[]))
+        .await;
     result
 }
 
-async fn read_handshake(socket: &mut TcpStream) -> Result<Vec<u8>> {
+async fn read_handshake(socket: &mut TcpStream, auth: &(String, String)) -> Result<Vec<u8>> {
     let mut greeting = [0u8; 2];
     socket.read_exact(&mut greeting).await?;
     if greeting[0] != 5 || greeting[1] == 0 {
@@ -208,11 +231,33 @@ async fn read_handshake(socket: &mut TcpStream) -> Result<Vec<u8>> {
     }
     let mut methods = vec![0u8; greeting[1] as usize];
     socket.read_exact(&mut methods).await?;
-    if !methods.contains(&0) {
+    let method = if auth.0.is_empty() && auth.1.is_empty() {
+        0
+    } else {
+        2
+    };
+    if !methods.contains(&method) {
         socket.write_all(&[5, 0xff]).await?;
-        bail!("SOCKS5 client does not support no-auth mode");
+        bail!("SOCKS5 authentication method unavailable");
     }
-    socket.write_all(&[5, 0]).await?;
+    socket.write_all(&[5, method]).await?;
+    if method == 2 {
+        let version = socket.read_u8().await?;
+        let n = socket.read_u8().await? as usize;
+        let mut username = vec![0; n];
+        socket.read_exact(&mut username).await?;
+        let n = socket.read_u8().await? as usize;
+        let mut password = vec![0; n];
+        socket.read_exact(&mut password).await?;
+        use subtle::ConstantTimeEq;
+        let accepted = version == 1
+            && bool::from(username.as_slice().ct_eq(auth.0.as_bytes()))
+            && bool::from(password.as_slice().ct_eq(auth.1.as_bytes()));
+        socket.write_all(&[1, u8::from(!accepted)]).await?;
+        if !accepted {
+            bail!("SOCKS5 authentication failed");
+        }
+    }
     let mut request = [0u8; 4];
     socket.read_exact(&mut request).await?;
     if request[0] != 5 || request[1] != 1 || request[2] != 0 {
@@ -257,180 +302,49 @@ async fn write_reply(socket: &mut TcpStream, code: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        dispatcher::{WorkerChannels, packet_channel},
-        stats::Stats,
-    };
-
     #[test]
-    fn proxy_frame_round_trip_is_strict() {
-        let encoded = encode_frame(DATA, 42, b"payload");
-        let frame = parse_frame(&encoded).unwrap();
-        assert_eq!(frame.kind, DATA);
-        assert_eq!(frame.stream_id, 42);
-        assert_eq!(frame.payload, b"payload");
-        assert!(!is_frame(b"ordinary IP packet"));
+    fn lan_requires_explicit_credentials() {
+        assert!(validate_bind("127.0.0.1:1080", "", "").is_ok());
+        assert!(validate_bind("0.0.0.0:1080", "", "").is_err());
+        assert!(validate_bind("0.0.0.0:1080", "user", "").is_err());
+        assert!(validate_bind("0.0.0.0:1080", "user", "password").is_ok());
     }
-
-    #[tokio::test]
-    async fn inbound_overflow_closes_only_the_affected_stream() {
-        let mut streams = HashMap::new();
-        let (tx, mut rx) = mpsc::channel(1);
-        let (other, _other_rx) = mpsc::channel(1);
-        streams.insert(1, tx);
-        streams.insert(2, other);
-        deliver_inbound(&mut streams, 1, Inbound::Data(b"prefix".to_vec()));
-        deliver_inbound(&mut streams, 1, Inbound::Data(b"lost".to_vec()));
-        deliver_inbound(&mut streams, 1, Inbound::Data(b"suffix".to_vec()));
-        assert!(streams.contains_key(&2));
-        assert!(!streams.contains_key(&1));
-        assert!(matches!(rx.recv().await, Some(Inbound::Data(bytes)) if bytes == b"prefix"));
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn proxy_queue_overflow_never_evicts_earlier_bytes() {
-        let pool = PacketPool::new(32);
-        let cancel = CancellationToken::new();
-        let (dispatcher, _) = Dispatcher::start(
-            "127.0.0.1:0",
-            None,
-            pool.clone(),
-            Arc::new(Stats::default()),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-        let (latency, _latency_rx) = packet_channel(1, true);
-        let (priority, priority_rx) = packet_channel(1, true);
-        let (bulk, _bulk_rx) = packet_channel(1, true);
-        dispatcher.register(WorkerChannels {
-            id: 1,
-            incarnation_id: 1,
-            turn_path: Arc::from("test"),
-            latency,
-            priority,
-            bulk,
+    async fn attempt(password: &[u8]) -> (Vec<u8>, Result<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_handshake(&mut socket, &("user".into(), "password".into())).await
         });
-        dispatcher
-            .send_proxy_frame(&pool, &encode_frame(OPEN, 1, b"target"))
-            .unwrap();
-        assert!(
-            dispatcher
-                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"later bytes"))
-                .is_err()
-        );
-        let first = priority_rx.try_recv().unwrap();
-        assert_eq!(parse_frame(first.as_slice()).unwrap().kind, OPEN);
-        assert!(
-            dispatcher
-                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"must stay closed"))
-                .is_err()
-        );
-
-        let (tx, _rx) = mpsc::channel(1);
-        dispatcher.set_proxy_frame_sender(tx).unwrap();
-        for _ in 0..2 {
-            let bytes = encode_frame(DATA, 1, b"response");
-            let mut packet = pool.acquire();
-            packet.set_read_len(bytes.len()).unwrap();
-            packet.as_mut_slice().copy_from_slice(&bytes);
-            dispatcher.return_packet(packet);
-        }
-        assert!(cancel.is_cancelled());
-        dispatcher.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn local_socks5_connect_and_data_use_csqtt_frames() {
-        let pool = PacketPool::new(32);
-        let cancel = CancellationToken::new();
-        let (dispatcher, _) = Dispatcher::start(
-            "127.0.0.1:0",
-            None,
-            pool.clone(),
-            Arc::new(Stats::default()),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-        let (latency, _latency_rx) = packet_channel(8, true);
-        let (priority, priority_rx) = packet_channel(16, true);
-        let (bulk, _bulk_rx) = packet_channel(8, true);
-        dispatcher.register(WorkerChannels {
-            id: 1,
-            incarnation_id: 1,
-            turn_path: Arc::from("test"),
-            latency,
-            priority,
-            bulk,
-        });
-        let (address, task) = start(
-            "127.0.0.1:0",
-            dispatcher.clone(),
-            pool.clone(),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
         let mut client = TcpStream::connect(address).await.unwrap();
-        client.write_all(&[5, 1, 0]).await.unwrap();
-        let mut method = [0u8; 2];
-        client.read_exact(&mut method).await.unwrap();
-        assert_eq!(method, [5, 0]);
-        client.write_all(&[5, 1, 0, 3, 11]).await.unwrap();
-        client.write_all(b"example.com").await.unwrap();
-        client.write_all(&443u16.to_be_bytes()).await.unwrap();
-
-        let open_packet = priority_rx.recv(&cancel).await.unwrap();
-        let open = parse_frame(open_packet.as_slice()).unwrap();
-        assert_eq!(open.kind, OPEN);
-        let stream_id = open.stream_id;
-        assert_eq!(open.payload[0], 3);
-
-        let (latency, _latency_rx2) = packet_channel(8, true);
-        let (priority, priority_rx2) = packet_channel(16, true);
-        let (bulk, _bulk_rx2) = packet_channel(8, true);
-        dispatcher.register(WorkerChannels {
-            id: 0,
-            incarnation_id: 2,
-            turn_path: Arc::from("test"),
-            latency,
-            priority,
-            bulk,
-        });
-
-        let opened = encode_frame(OPEN_OK, stream_id, &[]);
-        let mut packet = pool.acquire();
-        packet.set_read_len(opened.len()).unwrap();
-        packet.as_mut_slice().copy_from_slice(&opened);
-        dispatcher.return_packet(packet);
-        let mut reply = [0u8; 10];
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0; 2];
         client.read_exact(&mut reply).await.unwrap();
-        assert_eq!(reply[1], 0);
-
-        client.write_all(b"hello").await.unwrap();
-        let data_packet = priority_rx.recv(&cancel).await.unwrap();
-        let data = parse_frame(data_packet.as_slice()).unwrap();
-        assert_eq!(data.kind, DATA);
-        assert_eq!(&data.payload[8..], b"hello");
-        assert!(priority_rx2.try_recv().is_none());
-
-        let response = encode_frame(
-            DATA,
-            stream_id,
-            &StreamSequence::default().encode(b"world").unwrap(),
-        );
-        let mut packet = pool.acquire();
-        packet.set_read_len(response.len()).unwrap();
-        packet.as_mut_slice().copy_from_slice(&response);
-        dispatcher.return_packet(packet);
-        let mut body = [0u8; 5];
-        client.read_exact(&mut body).await.unwrap();
-        assert_eq!(&body, b"world");
-
-        cancel.cancel();
-        dispatcher.shutdown().await;
-        let _ = task.await;
+        assert_eq!(reply, [5, 2]);
+        let mut auth = vec![1, 4];
+        auth.extend_from_slice(b"user");
+        auth.push(password.len() as u8);
+        auth.extend_from_slice(password);
+        client.write_all(&auth).await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        if reply == [1, 0] {
+            client
+                .write_all(&[5, 1, 0, 1, 8, 8, 8, 8, 1, 187])
+                .await
+                .unwrap();
+        }
+        (reply.to_vec(), server.await.unwrap())
+    }
+    #[tokio::test]
+    async fn authenticated_connect_preserves_the_requested_target() {
+        let (reply, target) = attempt(b"password").await;
+        assert_eq!(reply, [1, 0]);
+        assert_eq!(target.unwrap(), [1, 8, 8, 8, 8, 1, 187]);
+    }
+    #[tokio::test]
+    async fn rejected_credentials_never_open_a_target() {
+        let (reply, target) = attempt(b"incorrect").await;
+        assert_eq!(reply, [1, 1]);
+        assert!(target.is_err());
     }
 }

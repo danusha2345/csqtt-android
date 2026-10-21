@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 amurcanov
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-use crate::client_perf::{self, Stage as PerfStage};
 use anyhow::{Result, bail};
 use bytes::BytesMut;
 use crossbeam_queue::ArrayQueue;
@@ -13,29 +12,13 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-
-/// Validate enough IP framing to reject control bytes and truncated datagrams.
-/// Payloads may have trailing padding; the declared IP packet must fit in the buffer.
-pub fn is_ip_packet(packet: &[u8]) -> bool {
-    match packet.first().map(|byte| byte >> 4) {
-        Some(4) if packet.len() >= 20 => {
-            let header = usize::from(packet[0] & 0x0f) * 4;
-            let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
-            header >= 20 && header <= total && total <= packet.len()
-        }
-        Some(6) if packet.len() >= 40 => {
-            let payload = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
-            40 + payload <= packet.len()
-        }
-        _ => false,
-    }
-}
+use tokio::sync::Notify;
 
 pub const PACKET_HEADROOM: usize = 64;
-pub const PACKET_CAPACITY: usize = 2304;
-pub const PACKET_POOL_PER_WORKER: usize = 256;
-pub const PACKET_POOL_SHARED: usize = 512;
-const PACKET_POOL_RETAINED_MAX: usize = 2048;
+pub const PACKET_CAPACITY: usize = 2048;
+pub const PACKET_POOL_PER_WORKER: usize = 64;
+pub const PACKET_POOL_SHARED: usize = 256;
+const PACKET_POOL_RETAINED_MAX: usize = 4096;
 
 pub const fn packet_pool_size(workers: usize) -> usize {
     workers
@@ -46,33 +29,33 @@ pub const fn packet_pool_size(workers: usize) -> usize {
 pub struct PacketPool {
     queue: ArrayQueue<BytesMut>,
     allocated: AtomicUsize,
-    retained: AtomicUsize,
-    retained_limit: usize,
+    allocation_limit: usize,
+    available: Notify,
 }
 
 impl PacketPool {
     pub fn new(buffers: usize) -> Arc<Self> {
         let capacity = buffers.max(1);
+        let retained_limit = capacity.min(PACKET_POOL_RETAINED_MAX);
         Arc::new(Self {
-            queue: ArrayQueue::new(capacity),
+            queue: ArrayQueue::new(retained_limit),
             allocated: AtomicUsize::new(0),
-            retained: AtomicUsize::new(0),
-            retained_limit: capacity.min(PACKET_POOL_RETAINED_MAX),
+            allocation_limit: capacity,
+            available: Notify::new(),
         })
     }
 
-    pub fn try_acquire(self: &Arc<Self>) -> Option<PacketBuf> {
-        client_perf::measure_sampled(PerfStage::PacketPool, 128, || self.try_acquire_inner())
+    pub async fn wait_available(&self) {
+        self.available.notified().await;
     }
 
-    fn try_acquire_inner(self: &Arc<Self>) -> Option<PacketBuf> {
+    pub fn try_acquire(self: &Arc<Self>) -> Option<PacketBuf> {
         let storage = if let Some(storage) = self.queue.pop() {
-            self.retained.fetch_sub(1, Ordering::AcqRel);
             storage
         } else {
             self.allocated
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |allocated| {
-                    (allocated < self.queue.capacity()).then_some(allocated + 1)
+                    (allocated < self.allocation_limit).then_some(allocated + 1)
                 })
                 .ok()?;
             BytesMut::zeroed(PACKET_CAPACITY)
@@ -91,13 +74,12 @@ impl PacketPool {
 
     #[cfg(test)]
     pub fn capacity(&self) -> usize {
-        self.queue.capacity()
+        self.allocation_limit
     }
 
     #[cfg(test)]
     pub fn available(&self) -> usize {
-        self.queue
-            .capacity()
+        self.allocation_limit
             .saturating_sub(self.allocated.load(Ordering::Acquire))
             .saturating_add(self.queue.len())
     }
@@ -113,28 +95,15 @@ impl PacketPool {
     }
 
     fn release(&self, storage: BytesMut) {
-        client_perf::measure_sampled(PerfStage::PacketPool, 128, || self.release_inner(storage));
-    }
-
-    fn release_inner(&self, storage: BytesMut) {
         if storage.len() != PACKET_CAPACITY {
             self.allocated.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        if self
-            .retained
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
-                (retained < self.retained_limit).then_some(retained + 1)
-            })
-            .is_err()
-        {
-            self.allocated.fetch_sub(1, Ordering::AcqRel);
+            self.available.notify_one();
             return;
         }
         if self.queue.push(storage).is_err() {
-            self.retained.fetch_sub(1, Ordering::AcqRel);
             self.allocated.fetch_sub(1, Ordering::AcqRel);
         }
+        self.available.notify_one();
     }
 }
 
@@ -157,7 +126,6 @@ impl PacketBuf {
         &self.storage[self.range.clone()]
     }
 
-    #[allow(dead_code)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.storage[self.range.clone()]
     }
@@ -358,32 +326,8 @@ mod tests {
 
     #[test]
     fn production_pool_covers_all_bounded_worker_queues() {
-        for (workers, expected) in [(9, 2_816), (27, 7_424), (108, 28_160), (126, 32_768)] {
+        for (workers, expected) in [(9, 832), (27, 1_984), (90, 6_016), (100, 6_656)] {
             assert_eq!(packet_pool_size(workers), expected);
         }
-    }
-}
-
-#[cfg(test)]
-mod ip_validation_tests {
-    use super::is_ip_packet;
-
-    #[test]
-    fn rejects_control_and_truncated_ip_without_rejecting_complete_ip() {
-        for packet in [vec![], vec![0xff], vec![0x55; 60], vec![0x45; 4]] {
-            assert!(!is_ip_packet(&packet));
-        }
-        let mut ipv4 = vec![0; 24];
-        ipv4[0] = 0x45;
-        ipv4[2..4].copy_from_slice(&24u16.to_be_bytes());
-        assert!(is_ip_packet(&ipv4));
-        assert!(!is_ip_packet(&ipv4[..23]));
-        ipv4[0] = 0x4f;
-        assert!(!is_ip_packet(&ipv4));
-        let mut ipv6 = vec![0; 48];
-        ipv6[0] = 0x60;
-        ipv6[4..6].copy_from_slice(&8u16.to_be_bytes());
-        assert!(is_ip_packet(&ipv6));
-        assert!(!is_ip_packet(&ipv6[..47]));
     }
 }

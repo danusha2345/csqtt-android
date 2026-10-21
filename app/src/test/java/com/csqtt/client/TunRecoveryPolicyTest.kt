@@ -53,6 +53,32 @@ class TunRecoveryPolicyTest {
         assertFalse(decide(activeDns = null))
     }
 
+    @Test
+    fun doNotRestoreInterfaceOnRevokeEvenWhenPermissionGranted() {
+        assertFalse(
+            TunRecoveryPolicy.shouldRestoreInterface(
+                permissionGranted = true,
+                stopRequested = false,
+                serviceDestroyed = false,
+                activeClientIp = "10.66.66.2",
+                activeDns = "1.1.1.1",
+            )
+        )
+    }
+
+    @Test
+    fun doNotRestoreInterfaceWhenStopRequested() {
+        assertFalse(
+            TunRecoveryPolicy.shouldRestoreInterface(
+                permissionGranted = true,
+                stopRequested = true,
+                serviceDestroyed = false,
+                activeClientIp = "10.66.66.2",
+                activeDns = "1.1.1.1",
+            )
+        )
+    }
+
     private fun decide(
         hasInterface: Boolean = true,
         descriptorValid: Boolean = true,

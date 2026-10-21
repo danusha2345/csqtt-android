@@ -9,9 +9,9 @@ OpenWrt 25.12 и новее используют `apk`, OpenWrt 24.10 и ста�
 Каталог содержит feed-рецепт `Makefile`, поэтому окончательный пакет следует
 создавать SDK именно той версии OpenWrt, которая установлена на роутере.
 
-Текущая ревизия пакетов: **2.1.17-2**, тег `openwrt-v2.1.17-r2`.
-В ней добавлены режимы маршрутизации по списку сетей и вариант с зоной `wan`; версия Rust-клиента — 2.1.17.
-Готовые файлы: [OpenWrt 2.1.17-2](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v2.1.17-r2).
+Ветка `feature/upstream-2.5-all`: пакеты **2.5.0-dev.1-1** с core 2.5.0-dev.1.
+Нужен сервер этой же ветки с CSQTT-WIRE-4; публикации этой сборки ещё нет.
+Предыдущая опубликованная линия: [OpenWrt 2.1.17-2](https://github.com/danusha2345/csqtt-android/releases/tag/openwrt-v2.1.17-r2).
 
 ## Сборка пакетов
 
@@ -67,7 +67,7 @@ uname -m
 ```sh
 apk add kmod-tun ip-full
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.17-2_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.5.0-dev.1-1_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -77,7 +77,7 @@ sh /tmp/csqtt-install/install.sh
 ```sh
 opkg update
 opkg install kmod-tun ip-full
-opkg install /tmp/csqtt-client_2.1.17-2_aarch64_generic.ipk
+opkg install /tmp/csqtt-client_2.5.0-dev.1-1_aarch64_generic.ipk
 ```
 
 ### Выбор firewall
@@ -230,3 +230,13 @@ VK-хеши публиковать нельзя.
 
 Сервис удалит созданные им policy rule, маршруты таблицы CSQTT и firewall
 rules. Конфигурация и бинарник останутся на месте для последующего запуска.
+
+## Настройки transport 2.5
+
+UCI поддерживает `srtp_mode=auto|wrap|dtls`, `custom_turn_ips`,
+`domain_routing`, `domain_whitelist`, `exclude_ru_zones`, `template_domains`,
+`direct_domains`, `ip_routing`, `ip_whitelist` и `direct_ips`.
+Они задают решения внутри native dispatcher; маршрутизация LAN и backend
+firewall по-прежнему управляются `route_mode`/`route_net` и `firewall`.
+Для LAN SOCKS5 задайте `socks5_user` и `socks5_password`: без обоих значений
+ядро отклонит bind за пределами loopback. Пароль не передаётся в argv.

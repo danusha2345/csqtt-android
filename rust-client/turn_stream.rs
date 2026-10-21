@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
-use socket2::SockRef;
+use socket2::{SockRef, TcpKeepalive};
 use std::{
     net::SocketAddr,
     sync::{Arc, OnceLock},
@@ -16,16 +16,40 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{mpsc, watch},
+    time::{Duration, timeout},
 };
 use turn_rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use turn_tokio_rustls::TlsConnector;
 
 pub const MAX_CONTROL_FRAME_BYTES: usize = 4096;
 const MAX_DATA_FRAME_BYTES: usize = PACKET_CAPACITY - PACKET_HEADROOM;
-const CONTROL_QUEUE_CAPACITY: usize = 16;
-const DATA_QUEUE_CAPACITY: usize = 8;
+const CONTROL_QUEUE_CAPACITY: usize = 32;
+const DATA_QUEUE_CAPACITY: usize = 64;
 const TCP_SEND_BUFFER_BYTES: usize = 32 * 1024;
-const STREAM_READ_BUFFER_BYTES: usize = MAX_CONTROL_FRAME_BYTES;
+const STREAM_READ_BUFFER_BYTES: usize = MAX_DATA_FRAME_BYTES;
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+static WRITE_STALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn write_stalls() -> u64 {
+    WRITE_STALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    wire: &[u8],
+) -> std::io::Result<()> {
+    match timeout(STREAM_WRITE_TIMEOUT, writer.write_all(wire)).await {
+        Ok(result) => result,
+        Err(_) => {
+            WRITE_STALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TURN relay write stalled for 1000 ms; connection must be replaced",
+            ))
+        }
+    }
+}
 
 trait AsyncTurnStream: AsyncRead + AsyncWrite + Send + Unpin {}
 
@@ -58,23 +82,32 @@ pub async fn connect(
     TurnStreamReader,
     TurnStreamWriteFailure,
 )> {
-    let socket = TcpStream::connect(server)
+    let socket = timeout(STREAM_CONNECT_TIMEOUT, TcpStream::connect(server))
         .await
+        .context("TURN TCP connect timed out")?
         .with_context(|| format!("TURN {} connect {server}", endpoint.transport.as_str()))?;
     socket
         .set_nodelay(true)
         .context("TURN TCP_NODELAY configuration failed")?;
     let _ = SockRef::from(&socket).set_send_buffer_size(TCP_SEND_BUFFER_BYTES);
+    let _ = SockRef::from(&socket).set_tcp_keepalive(
+        &TcpKeepalive::new()
+            .with_time(Duration::from_secs(120))
+            .with_interval(Duration::from_secs(30)),
+    );
     let stream: BoxedTurnStream = match endpoint.transport {
         TurnWireTransport::Tcp => Box::new(socket),
         TurnWireTransport::Tls => {
             let server_name = ServerName::try_from(endpoint.tls_server_name()?.to_owned())
                 .context("TURN TLS server name is invalid")?;
             let connector = TlsConnector::from(tls_config());
-            let stream = connector
-                .connect(server_name, socket)
-                .await
-                .with_context(|| format!("TURN TLS handshake to {} failed", endpoint.host))?;
+            let stream = timeout(
+                STREAM_CONNECT_TIMEOUT,
+                connector.connect(server_name, socket),
+            )
+            .await
+            .with_context(|| format!("TURN TLS handshake to {} timed out", endpoint.host))?
+            .with_context(|| format!("TURN TLS handshake to {} failed", endpoint.host))?;
             Box::new(stream)
         }
         TurnWireTransport::Udp => bail!("UDP endpoint cannot create a TURN stream"),
@@ -105,14 +138,20 @@ impl TurnStreamWriter {
             .context("TURN stream control queue closed")
     }
 
-    pub fn try_write_data(&self, packet: PacketBuf) -> Result<bool> {
+    pub fn write_data(&self, packet: PacketBuf) -> Result<()> {
         match self.data.try_send(packet) {
-            Ok(()) => Ok(true),
-            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                bail!("TURN stream data queue full")
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 bail!("TURN stream data queue closed")
             }
         }
+    }
+
+    pub fn can_send(&self) -> bool {
+        self.data.capacity() > 0
     }
 }
 
@@ -151,7 +190,9 @@ async fn writer_loop(
             TurnStreamOutbound::Control(wire) => wire.as_ref(),
             TurnStreamOutbound::Data(packet) => packet.as_slice(),
         };
-        if let Err(error) = writer.write_all(wire).await {
+        // A timed out write may have sent a prefix. Never reuse this TCP/TLS
+        // stream: report failure and drop the writer so the worker reconnects.
+        if let Err(error) = write_frame(&mut writer, wire).await {
             let _ = write_failure.send(Some(Arc::from(format!("{error}"))));
             return;
         }
@@ -292,6 +333,29 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn stream_data_rejects_when_queue_full() {
+        let (control, _control_rx) = mpsc::channel(1);
+        let (data, mut data_rx) = mpsc::channel(1);
+        let writer = Arc::new(TurnStreamWriter { control, data });
+        let pool = PacketPool::new(2);
+        assert!(writer.can_send());
+        writer.write_data(pool.acquire()).unwrap();
+        assert!(!writer.can_send());
+        assert!(writer.write_data(pool.acquire()).is_err());
+        drop(data_rx.recv().await);
+        assert!(writer.can_send());
+    }
+
+    #[test]
+    fn stream_send_buffers_cover_a_two_megabit_worker_with_rtt_headroom() {
+        assert_eq!(DATA_QUEUE_CAPACITY, 64);
+        let bits: u128 = (TCP_SEND_BUFFER_BYTES as u128) * 8;
+        let buffered_ms = bits * 1000 / 2_000_000;
+        assert!(buffered_ms <= 260);
+        assert!(buffered_ms >= 50);
+    }
+
+    #[tokio::test]
     async fn stream_reader_parses_control_and_padded_channel_data() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -378,5 +442,26 @@ mod tests {
             Ok(_) => panic!("invalid TURN stream frame was accepted"),
         }
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_write_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn stalled_write_expires_even_after_a_partial_frame() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let started = tokio::time::Instant::now();
+        let error = write_frame(&mut writer, &[7; 4096]).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), STREAM_WRITE_TIMEOUT);
+    }
+    #[tokio::test]
+    async fn successful_write_preserves_the_frame() {
+        let (mut writer, mut reader) = tokio::io::duplex(16);
+        write_frame(&mut writer, b"frame").await.unwrap();
+        let mut received = [0; 5];
+        reader.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"frame");
     }
 }

@@ -24,4 +24,12 @@ class MainNavigationSwipeTest {
         assertTrue(shouldCommitNavigationSwipe(0.4001f))
         assertTrue(shouldCommitNavigationSwipe(1f))
     }
+
+    @Test
+    fun participantModeFiltersDeployAndLogsByDefault() {
+        assertEquals(listOf(0, 1, 2, 3, 4), resolveActiveNavIds(csqttLinkMode = false, participantShowLogs = false))
+        assertEquals(listOf(0, 1, 2, 3, 4), resolveActiveNavIds(csqttLinkMode = false, participantShowLogs = true))
+        assertEquals(listOf(0, 1, 4), resolveActiveNavIds(csqttLinkMode = true, participantShowLogs = false))
+        assertEquals(listOf(0, 1, 3, 4), resolveActiveNavIds(csqttLinkMode = true, participantShowLogs = true))
+    }
 }

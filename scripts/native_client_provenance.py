@@ -84,6 +84,8 @@ def input_files() -> list[Path]:
         ROOT / "shared/striped_scheduler.rs",
         ROOT / "shared/proxy_sequence.rs",
     ]
+    files.extend((ROOT / "shared").glob("*.rs"))
+    files.extend(path for path in (ROOT / "rust-client/vendor/netstack-smoltcp").rglob("*") if path.is_file())
     files.extend((ROOT / "rust-client").glob("*.rs"))
     files.extend(path for path in (ROOT / "rust-client/dispatcher").rglob("*") if path.is_file())
     files.extend(path for path in (ROOT / "rust-client/vendor/primp").rglob("*") if path.is_file())
@@ -194,6 +196,8 @@ def verify_manifest() -> None:
 
 def verify_release() -> None:
     verify_manifest()
+    from server_asset_provenance import verify as verify_server
+    verify_server(ROOT)
     _, version = package_identity()
     deploy = ROOT / "app/src/main/assets/deploy.sh"
     require_file(deploy, "deploy.sh")
@@ -215,9 +219,15 @@ def verify_release() -> None:
 
 
 def main() -> None:
+    global ROOT, MANIFEST, CARGO_TOML, CARGO_LOCK
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("write", "verify", "verify-release"))
+    parser.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args()
+    ROOT = args.root.resolve()
+    MANIFEST = ROOT / "app/src/main/libclient.provenance.json"
+    CARGO_TOML = ROOT / "rust-client/Cargo.toml"
+    CARGO_LOCK = ROOT / "rust-client/Cargo.lock"
     if args.mode == "write":
         write_manifest()
     elif args.mode == "verify-release":

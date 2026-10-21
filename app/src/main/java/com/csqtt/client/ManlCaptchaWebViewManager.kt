@@ -46,7 +46,8 @@ object ManlCaptchaWebViewManager {
     }
 
     fun cancelCaptcha() {
-        pendingResult.get()?.completeExceptionally(CancellationException("Cancelled by system"))
+        isCaptchaPending = false
+        pendingResult.getAndSet(null)?.completeExceptionally(CancellationException("Cancelled by system"))
     }
 
     private const val NOTIFICATION_ID = CsqttConstants.Notifications.CAPTCHA_NOTIFICATION_ID

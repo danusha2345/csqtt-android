@@ -12,7 +12,8 @@ data class ConnectionSource(
     val password: String,
     val hashes: String,
     val hashesFromLink: Boolean,
-    val webPort: Int,
+    val vkAccessToken: String,
+    val tokenFromLink: Boolean,
 )
 
 internal fun selectConnectionHashes(
@@ -31,27 +32,29 @@ internal fun selectConnectionHashes(
 
 suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
     val invalidHashes = VkHashValidationCodec.decode(store.vkHashCheckResults.first())
-    fun activeHashes(raw: String): String = VkHashValidationCodec.active(
-        raw.split(Regex("[,\\s\\n]+")),
-        invalidHashes,
-    ).joinToString(",")
+    fun activeHashes(raw: String): String =
+        selectConnectionHashes(emptyList(), raw, invalidHashes)?.first.orEmpty()
+
 
     if (store.csqttLinkMode.first()) {
         val link = parseCsqttLink(store.csqttLink.first()) ?: return null
-        val selectedHashes = selectConnectionHashes(link.hashes, store.vkHashes.first(), invalidHashes)
-            ?: return null
+        val tokenFromLink = link.vkAccessToken.isNotEmpty()
+        val selection = if (tokenFromLink) "" to false else
+            selectConnectionHashes(link.hashes, store.vkHashes.first(), invalidHashes) ?: return null
         return ConnectionSource(
             peer = link.peerAddress(),
             password = link.password,
-            hashes = selectedHashes.first,
-            hashesFromLink = selectedHashes.second,
-            webPort = link.webPort,
+            hashes = selection.first,
+            hashesFromLink = selection.second,
+            vkAccessToken = link.vkAccessToken,
+            tokenFromLink = tokenFromLink,
         )
     }
 
     val basePeer = store.peer.first()
-    val password = store.connectionPassword.first()
-    if (basePeer.isBlank() || password.isBlank()) return null
+    val passwordState = store.connectionPasswordState.first()
+    val password = passwordState.value
+    if (basePeer.isBlank()) return null
     val serverPeerPort = if (store.manualPortsEnabled.first()) {
         store.serverPeerPort.first()
     } else {
@@ -63,6 +66,7 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
         password = password,
         hashes = activeHashes(store.vkHashes.first()),
         hashesFromLink = false,
-        webPort = store.serverWebPort.first(),
+        vkAccessToken = "",
+        tokenFromLink = false,
     )
 }

@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 use crate::{
-    net_setup::TUN_IFACE,
-    perf::{self, Profiler, Stage, thread_cpu_time_ns},
+    net_setup::{TUN_ADDR, TUN_IFACE},
     tokio_io::{
-        IoCounters, MAX_RX_PER_PASS, PacketSink, RxOutcome, TICK_INTERVAL_MS, TUN_RX_DRAIN_BATCH,
+        IoCounters, MAX_RX_PER_PASS, PacketOutput, RxOutcome, TICK_INTERVAL_MS, TUN_RX_DRAIN_BATCH,
         TokioIo,
     },
 };
@@ -30,23 +29,25 @@ const RESTART_BACKOFF_MAX_MS: u64 = 30_000;
 const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
 const COMMAND_DRAIN_LIMIT: usize = 4096;
 const SHUTDOWN_FLUSH_SYSCALLS: usize = 16;
-const MAX_CONSECUTIVE_UDP_PASSES: u32 = 4;
+const UDP_RX_PACKET_BUDGET: usize = MAX_RX_PER_PASS;
+const DATAPLANE_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 pub trait DataplaneLogic: Send + 'static {
     type Command: Send + 'static;
 
-    fn on_udp(
+    fn on_udp<S: PacketOutput>(
         &mut self,
         peer: SocketAddr,
         local_ip: Option<IpAddr>,
         packet: &mut [u8],
-        sink: &mut PacketSink<'_>,
+        sink: &mut S,
     );
-    fn on_tun(&mut self, packet: &mut [u8], sink: &mut PacketSink<'_>);
-    fn on_tun_batch_end(&mut self, _sink: &mut PacketSink<'_>) {}
+    fn on_tun<S: PacketOutput>(&mut self, packet: &mut [u8], sink: &mut S);
+    fn on_tun_batch_end<S: PacketOutput>(&mut self, _sink: &mut S) {}
+    fn on_udp_batch_end<S: PacketOutput>(&mut self, _sink: &mut S) {}
     fn begin_batch(&mut self, now: Instant);
-    fn on_command(&mut self, command: Self::Command, sink: &mut PacketSink<'_>);
-    fn on_tick(&mut self, sink: &mut PacketSink<'_>);
+    fn on_command<S: PacketOutput>(&mut self, command: Self::Command, sink: &mut S);
+    fn on_tick<S: PacketOutput>(&mut self, sink: &mut S);
     fn on_io_counters(&mut self, counters: IoCounters);
 }
 
@@ -62,7 +63,7 @@ impl DataplaneConfig {
         Self {
             listen,
             tun_iface: TUN_IFACE.to_owned(),
-            tun_addr: crate::net_setup::network().gateway.clone(),
+            tun_addr: TUN_ADDR.to_owned(),
             command_capacity: 4096,
         }
     }
@@ -78,13 +79,6 @@ struct HandleInner<C> {
     cancel_token: CancellationToken,
     shutdown_flag: Arc<AtomicBool>,
     queued_commands: Arc<AtomicUsize>,
-    command_capacity: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DataplaneQueueSnapshot {
-    pub queued: usize,
-    pub capacity: usize,
 }
 
 pub struct DataplaneHandle<C> {
@@ -123,13 +117,6 @@ impl<C> DataplaneHandle<C> {
                 decrement_queue_len(&self.inner.queued_commands);
                 Ok(())
             }
-        }
-    }
-
-    pub fn command_queue_snapshot(&self) -> DataplaneQueueSnapshot {
-        DataplaneQueueSnapshot {
-            queued: self.inner.queued_commands.load(Ordering::Acquire),
-            capacity: self.inner.command_capacity,
         }
     }
 }
@@ -186,7 +173,7 @@ pub fn spawn<L, F>(
 ) -> Result<DataplaneRuntime<L::Command>>
 where
     L: DataplaneLogic,
-    F: Fn() -> L + Send + 'static,
+    F: Fn() -> L + Send + Sync + 'static,
 {
     let command_capacity = config.command_capacity.max(16);
     let queued_commands = Arc::new(AtomicUsize::new(0));
@@ -199,7 +186,6 @@ where
             cancel_token: cancel_token.clone(),
             shutdown_flag: shutdown.clone(),
             queued_commands: queued_commands.clone(),
-            command_capacity,
         }),
     };
     let (startup_tx, startup_rx) = mpsc::sync_channel::<Result<()>>(1);
@@ -209,6 +195,7 @@ where
     let thread_cancel_token = cancel_token.clone();
     let join = std::thread::Builder::new()
         .name("csqtt-dataplane".to_owned())
+        .stack_size(DATAPLANE_STACK_BYTES)
         .spawn(move || {
             let mut command_rx = command_rx;
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -308,124 +295,158 @@ where
         Ok(io) => io,
         Err(error) => {
             if let Some(startup_tx) = startup_tx {
-                let _ = startup_tx.send(Err(clone_anyhow(&error)));
+                let _ = startup_tx.send(Err(anyhow!("{error:#}")));
             }
             return Err(error);
         }
     };
-    perf::publish_dataplane_tid();
     if let Some(startup_tx) = startup_tx {
         let _ = startup_tx.send(Ok(()));
     }
-    let mut profiler = Profiler::default();
     let mut last_counters = io.counters_snapshot();
     let mut last_report_packets = 0u64;
-    let mut publish_perf = false;
-    let mut consecutive_udp_passes = 0u32;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_INTERVAL_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut prefer_udp = false;
+
+    macro_rules! handle_udp_rx {
+        () => {{
+            io.note_readiness_wakeup();
+            logic.begin_batch(Instant::now());
+            let mut processed = 0usize;
+            while processed < UDP_RX_PACKET_BUDGET {
+                match io.dispatch_udp_rx(
+                    UDP_RX_PACKET_BUDGET - processed,
+                    &mut |peer, local_ip, packet, sink| logic.on_udp(peer, local_ip, packet, sink),
+                ) {
+                    RxOutcome::Batch(batch) => processed += batch,
+                    RxOutcome::Drained => break,
+                }
+            }
+            io.with_sink(|sink| logic.on_udp_batch_end(sink));
+            if io.pending_tun_tx_len() != 0 {
+                io.flush_tun_tx();
+            }
+            if io.pending_udp_tx_len() != 0 {
+                io.flush_udp_tx(usize::MAX);
+            }
+        }};
+    }
+
+    macro_rules! handle_tun_rx {
+        () => {{
+            io.note_readiness_wakeup();
+            logic.begin_batch(Instant::now());
+            let mut processed = 0usize;
+            while processed < TUN_RX_DRAIN_BATCH {
+                match io.read_tun_rx(TUN_RX_DRAIN_BATCH - processed, &mut |packet, sink| {
+                    logic.on_tun(packet, sink)
+                }) {
+                    Ok(RxOutcome::Batch(batch)) => processed += batch,
+                    Ok(RxOutcome::Drained) => break,
+                    Err(error) => {
+                        return Err(anyhow!("TUN RX failed: {error:#}"));
+                    }
+                }
+            }
+            io.with_sink(|sink| logic.on_tun_batch_end(sink));
+            if io.pending_udp_tx_len() != 0 {
+                io.flush_udp_tx(usize::MAX);
+            }
+        }};
+    }
+
+    macro_rules! handle_tick {
+        () => {{
+            logic.begin_batch(Instant::now());
+            io.with_sink(|sink| logic.on_tick(sink));
+            logic.on_io_counters(io.counters_snapshot());
+        }};
+    }
+
+    macro_rules! handle_command {
+        ($command:expr) => {{
+            let mut keep_running = true;
+            match $command {
+                Some(RuntimeCommand::Logic(command)) => {
+                    decrement_queue_len(queued_commands);
+                    logic.begin_batch(Instant::now());
+                    io.with_sink(|sink| logic.on_command(command, sink));
+                }
+                Some(RuntimeCommand::Shutdown) => {
+                    decrement_queue_len(queued_commands);
+                    keep_running = false;
+                }
+                None => keep_running = false,
+            }
+            if keep_running {
+                for _ in 0..COMMAND_DRAIN_LIMIT {
+                    match command_rx.try_recv() {
+                        Ok(RuntimeCommand::Logic(command)) => {
+                            decrement_queue_len(queued_commands);
+                            logic.begin_batch(Instant::now());
+                            io.with_sink(|sink| logic.on_command(command, sink));
+                        }
+                        Ok(RuntimeCommand::Shutdown) => {
+                            decrement_queue_len(queued_commands);
+                            keep_running = false;
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if !keep_running {
+                break;
+            }
+        }};
+    }
 
     while !shutdown.load(Ordering::Acquire) && !cancel_token.is_cancelled() {
         let udp_pending = io.pending_udp_tx_len() != 0;
         let tun_pending = io.pending_tun_tx_len() != 0;
-        let udp_throttled = consecutive_udp_passes >= MAX_CONSECUTIVE_UDP_PASSES;
-        let udp_read = io.udp.readable();
-        let tun_read = io.tun.readable();
-        let udp_write = io.udp.writable();
-        let tun_write = io.tun.writable();
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => break,
-            _ = tick.tick() => {
-                consecutive_udp_passes = 0;
-                profiler.refresh_enabled();
-                if profiler.enabled() {
-                    perf::publish_dataplane_cpu(thread_cpu_time_ns());
+        if prefer_udp {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => break,
+                _ = tick.tick() => handle_tick!(),
+                command = command_rx.recv() => handle_command!(command),
+                _ = io.udp.writable(), if udp_pending => {
+                    io.flush_udp_tx(usize::MAX);
                 }
-                let dispatch_started = profiler.begin(Stage::Dispatch, 0);
-                logic.begin_batch(Instant::now());
-                io.with_sink(|sink| logic.on_tick(sink));
-                logic.on_io_counters(io.counters_snapshot());
-                publish_perf = true;
-                profiler.finish(Stage::Dispatch, dispatch_started);
-            }
-            command = command_rx.recv() => {
-                consecutive_udp_passes = 0;
-                let mut keep_running = true;
-                match command {
-                    Some(RuntimeCommand::Logic(command)) => {
-                        decrement_queue_len(queued_commands);
-                        let dispatch_started = profiler.begin(Stage::Dispatch, 0);
-                        logic.begin_batch(Instant::now());
-                        io.with_sink(|sink| logic.on_command(command, sink));
-                        profiler.finish(Stage::Dispatch, dispatch_started);
-                    }
-                    Some(RuntimeCommand::Shutdown) => keep_running = false,
-                    None => keep_running = false,
+                _ = io.tun.writable(), if tun_pending => {
+                    io.flush_tun_tx();
                 }
-                if keep_running {
-                    for _ in 0..COMMAND_DRAIN_LIMIT {
-                        match command_rx.try_recv() {
-                            Ok(RuntimeCommand::Logic(command)) => {
-                                decrement_queue_len(queued_commands);
-                                let dispatch_started = profiler.begin(Stage::Dispatch, 0);
-                                logic.begin_batch(Instant::now());
-                                io.with_sink(|sink| logic.on_command(command, sink));
-                                profiler.finish(Stage::Dispatch, dispatch_started);
-                            }
-                            Ok(RuntimeCommand::Shutdown) => {
-                                keep_running = false;
-                                break;
-                            }
-                            Err(_) => break,
-                        }
-                    }
+                _ = io.udp.readable() => {
+                    prefer_udp = false;
+                    handle_udp_rx!();
                 }
-                if !keep_running {
-                    break;
+                _ = io.tun.readable() => {
+                    prefer_udp = true;
+                    handle_tun_rx!();
                 }
             }
-            _ = udp_read, if !udp_throttled => {
-                consecutive_udp_passes = consecutive_udp_passes.saturating_add(1);
-                io.note_readiness_wakeup();
-                logic.begin_batch(Instant::now());
-                let started = profiler.begin(Stage::UdpRx, 0);
-                let mut processed = 0usize;
-                while processed < MAX_RX_PER_PASS {
-                    match io.dispatch_udp_rx(MAX_RX_PER_PASS - processed, &mut |peer, local_ip, packet, sink| {
-                        logic.on_udp(peer, local_ip, packet, sink)
-                    }) {
-                        RxOutcome::Batch(batch) => processed += batch,
-                        RxOutcome::Drained => break,
-                    }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => break,
+                _ = tick.tick() => handle_tick!(),
+                command = command_rx.recv() => handle_command!(command),
+                _ = io.udp.writable(), if udp_pending => {
+                    io.flush_udp_tx(usize::MAX);
                 }
-                profiler.expand_batch(Stage::UdpRx, processed as u64, 0, started.is_some());
-                profiler.finish(Stage::UdpRx, started);
-            }
-            _ = tun_read => {
-                consecutive_udp_passes = 0;
-                io.note_readiness_wakeup();
-                logic.begin_batch(Instant::now());
-                let started = profiler.begin(Stage::TunRx, 0);
-                let mut processed = 0usize;
-                while processed < TUN_RX_DRAIN_BATCH {
-                    match io.read_tun_rx(&mut |packet, sink| logic.on_tun(packet, sink)) {
-                        Ok(count) if count > 0 => processed += count,
-                        Ok(_) => break,
-                        Err(error) => {
-                            return Err(anyhow!("TUN RX failed: {error:#}"));
-                        }
-                    }
+                _ = io.tun.writable(), if tun_pending => {
+                    io.flush_tun_tx();
                 }
-                io.with_sink(|sink| logic.on_tun_batch_end(sink));
-                profiler.expand_batch(Stage::TunRx, processed as u64, 0, started.is_some());
-                profiler.finish(Stage::TunRx, started);
-            }
-            _ = udp_write, if udp_pending => {
-                io.flush_udp_tx(usize::MAX);
-            }
-            _ = tun_write, if tun_pending => {
-                io.flush_tun_tx();
+                _ = io.tun.readable() => {
+                    prefer_udp = true;
+                    handle_tun_rx!();
+                }
+                _ = io.udp.readable() => {
+                    prefer_udp = false;
+                    handle_udp_rx!();
+                }
             }
         }
         if io.take_tun_fatal() {
@@ -433,9 +454,7 @@ where
         }
         let pending_udp_tx = io.pending_udp_tx_len();
         if pending_udp_tx != 0 {
-            let flush_started = profiler.begin(Stage::Flush, pending_udp_tx);
             io.flush_udp_tx(usize::MAX);
-            profiler.finish(Stage::Flush, flush_started);
         }
         let pending_tun_tx = io.pending_tun_tx_len();
         if pending_tun_tx != 0 {
@@ -444,7 +463,6 @@ where
         if io.take_tun_fatal() {
             return Err(anyhow!("TUN write failed"));
         }
-        let bookkeeping_started = profiler.begin(Stage::Bookkeeping, 0);
         let counters = io.counters_snapshot();
         let total_rx = counters
             .udp_rx_packets
@@ -458,11 +476,6 @@ where
             logic.on_io_counters(counters);
             last_counters = counters;
             last_report_packets = total_rx;
-        }
-        profiler.finish(Stage::Bookkeeping, bookkeeping_started);
-        if publish_perf {
-            publish_perf = false;
-            profiler.publish_dataplane();
         }
     }
     if io.pending_udp_tx_len() != 0 {
@@ -489,8 +502,4 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
     } else {
         "unknown panic".to_owned()
     }
-}
-
-fn clone_anyhow(error: &anyhow::Error) -> anyhow::Error {
-    anyhow!(error.to_string())
 }

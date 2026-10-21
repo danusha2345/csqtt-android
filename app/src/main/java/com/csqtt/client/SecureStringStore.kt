@@ -28,8 +28,6 @@ class SecureStringStore(context: Context) {
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
     }
 
-    // Keystore crypto costs an IPC round-trip; DataStore re-emits the whole
-    // preferences object on every edit, so unchanged ciphertexts are memoized.
     private val decryptCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     fun encrypt(value: String): String {

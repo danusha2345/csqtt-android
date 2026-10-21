@@ -29,11 +29,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -44,16 +47,12 @@ import java.net.URL
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = CsqttConstants.Notifications.TUNNEL_CHANNEL_ID
 private const val TUNNEL_NOTIFICATION_ID = CsqttConstants.Notifications.TUNNEL_NOTIFICATION_ID
-// Stats change every couple of seconds; rebuilding the notification that often
-// keeps SystemUI busy for no visible benefit.
 private const val NOTIFICATION_MIN_REBUILD_INTERVAL_MS = 5_000L
-// A network-set change restarts the tunnel only after the set stops flapping.
 private const val NETWORK_SWAP_SETTLE_MS = 4_000L
-// Android can briefly report the physical default network as lost while a VPN
-// is recreated or the transport hands over. Do not turn one callback into a
-// PAUSE: recheck the complete physical-network set after a short grace period.
 private const val NETWORK_LOSS_GRACE_MS = 2_000L
 private const val AUTO_PAUSE_WIFI_RECONCILE_MS = 1_000L
+private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
+private const val WAKE_LOCK_RENEWAL_WINDOW_MS = 60 * 1_000L
 private const val VK_PROBE_CONNECT_TIMEOUT_MS = 3_000
 private const val VK_PROBE_READ_TIMEOUT_MS = 3_000
 private val VK_PROBE_URLS = listOf(
@@ -74,12 +73,17 @@ class TunnelService : Service() {
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Default)
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLockExpiresAtElapsedMs = 0L
     private var wifiLock: WifiManager.WifiLock? = null
     private var updateJob: Job? = null
-    private var configSyncJob: Job? = null
+    private var startJob: Job? = null
+    @Volatile
+    private var startGeneration = 0L
     private var lastNotificationText: String? = null
     private var lastNotificationPostElapsedMs = 0L
+    @Volatile
     private var isStopping = false
+    @Volatile
     private var resourcesReleased = false
     private var foregroundStarted = false
     private lateinit var connectivityManager: ConnectivityManager
@@ -94,6 +98,7 @@ class TunnelService : Service() {
     private var vkRecoveryJob: Job? = null
     private var autoPauseSettingsJob: Job? = null
     private var autoPauseWifiWatchJob: Job? = null
+    private var domainRoutingSettingsJob: Job? = null
     private val autoPauseMutex = Mutex()
     private val wifiNetworkLock = Any()
     private val physicalWifiNetworks = mutableSetOf<Network>()
@@ -114,6 +119,7 @@ class TunnelService : Service() {
         registerAirplaneModeReceiver()
         registerPhysicalNetworkCallback()
         observeAutoPauseOnWifi()
+        observeDomainRoutingSettings()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -123,6 +129,10 @@ class TunnelService : Service() {
 
         when (intent.action) {
             "START" -> {
+                isStopping = false
+                resourcesReleased = false
+                startJob?.cancel()
+                val requestGeneration = ++startGeneration
                 autoPauseRequested = true
                 TunnelManager.starting.value = true
                 val notification = createNotification("Запуск...")
@@ -135,134 +145,139 @@ class TunnelService : Service() {
                 val intentGenId = intent.getLongExtra("generation_id", 0L)
                 val intentSalt = intent.getStringExtra("session_salt") ?: ""
 
-                serviceScope.launch {
+                startJob = serviceScope.launch {
                     try {
                         val store = SettingsStore(applicationContext)
                         autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
                         TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
-                        if (reconcileWifiAutoPause()) return@launch
+                        if (reconcileWifiAutoPause()) {
+                            TunnelManager.starting.value = false
+                            return@launch
+                        }
+                        if (!isCurrentStart(requestGeneration)) return@launch
                         val genId = store.reserveConnectionGeneration(intentGenId)
                         val salt = if (intentSalt.isNotBlank() && genId == intentGenId) {
                             intentSalt
                         } else {
-                            java.util.UUID.randomUUID().toString().replace("-", "")
+                            newTunnelSessionId()
                         }
 
                         val requestedWorkers = intent.getIntExtra("workers_per_hash", 18)
-                        val vkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode"))
+                        val requestedVkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode"))
+                        val intentHashes = intent.getStringExtra("vk_hashes") ?: ""
+                        val hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)
+                        val linkAccessToken = intent.getStringExtra("vk_access_token")
+                            .orEmpty()
+                            .takeIf { intent.getBooleanExtra("vk_token_from_link", false) && it.isNotBlank() }
+                        val configuredHashMode = store.vkHashMode.first()
+                        val vkAuthMode = when {
+                            hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
+                            linkAccessToken != null -> {
+                                if (configuredHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
+                                    CsqttConstants.VkAuth.MODE_AUTO_JS
+                                } else {
+                                    if (requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) CsqttConstants.VkAuth.MODE_CALLS else requestedVkAuthMode
+                                }
+                            }
+                            else -> requestedVkAuthMode
+                        }
                         val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-                        val isExtra = !accountAutoJs && store.extraWorkers.first()
-                        val maxWorkers = WorkerCountPolicy.defaultMaximum(isExtra)
+                        val maxWorkers = CsqttConstants.Tunnel.MAX_WORKERS
                         val workersPerHash = WorkerCountPolicy.normalize(requestedWorkers, maximum = maxWorkers)
                         TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
-                        var effectivePeer = intent.getStringExtra("peer") ?: ""
-                        var effectiveHashes = intent.getStringExtra("vk_hashes") ?: ""
-                        var hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)
-                        val connectionPassword = intent.getStringExtra("connection_password") ?: ""
                         if (accountAutoJs) {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_AUTO_JS)
+                        } else if (hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) {
+                            store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
                         }
-                        if (!awaitVkNetwork()) return@launch
-                        val syncState = store.configSyncState()
-                        if (syncState.enabled && effectivePeer.isNotBlank() && connectionPassword.isNotBlank()) {
-                            val webPort = intent.getIntExtra("config_web_port", store.serverWebPort.first())
-                            ConfigSyncClient.fetch(effectivePeer, connectionPassword, webPort)
-                                .onSuccess { remote ->
-                                    if (!remote.active) {
-                                        TunnelManager.updateLog(
-                                            "config_sync_inactive",
-                                            "Сервер отключил эту конфигурацию",
-                                            99,
-                                            true,
-                                        )
-                                        launch(Dispatchers.Main) { stopTunnel() }
-                                        return@launch
-                                    }
-                                    effectivePeer = ConfigSyncClient.withPeerPort(effectivePeer, remote.peerPort)
-                                        ?: effectivePeer
-                                    if (remote.vkHashes.isNotEmpty()) {
-                                        effectiveHashes = remote.vkHashes
-                                        hashesFromLink = false
-                                    }
-                                    store.saveSyncedConfig(
-                                        revision = remote.revision,
-                                        vkHashes = remote.vkHashes,
-                                        peerPort = remote.peerPort,
-                                        checkedAt = System.currentTimeMillis(),
-                                    )
-                                    TunnelManager.updateLog(
-                                        "config_sync_ok",
-                                        if (remote.revision == syncState.revision) {
-                                            "Конфигурация сервера актуальна"
-                                        } else {
-                                            "Конфигурация и VK-хеши обновлены"
-                                        },
-                                        34,
-                                        false,
-                                    )
-                                }
-                                .onFailure { error ->
-                                    TunnelManager.updateLog(
-                                        "config_sync_warning",
-                                        "Безопасное обновление недоступно: ${error.message ?: error.javaClass.simpleName}",
-                                        62,
-                                        false,
-                                    )
-                                }
+                        if (!awaitVkNetwork()) {
+                            TunnelManager.starting.value = false
+                            return@launch
                         }
-                        val resolvedHashes = if (hashesFromLink && !accountAutoJs) {
-                            ResolvedVkHashes(effectiveHashes, false)
+                        if (!isCurrentStart(requestGeneration)) return@launch
+                        val resolvedHashes = if (hashesFromLink && linkAccessToken == null && !accountAutoJs) {
+                            ResolvedVkHashes(intentHashes, false)
                         } else {
                             resolveAutoHashes(
                                 store,
-                                effectiveHashes,
+                                intentHashes,
                                 workersPerHash,
-                                if (accountAutoJs) CsqttConstants.VkAutoHash.MODE_AUTO_JS else null,
+                                when {
+                                    accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                                    linkAccessToken != null -> CsqttConstants.VkAutoHash.MODE_AUTO_API
+                                    else -> null
+                                },
+                                linkAccessToken,
+                                tokenFromLink = linkAccessToken != null,
                             )
                         }
                         if (resolvedHashes == null) {
+                            TunnelManager.starting.value = false
                             TunnelManager.updateLog(
                                 "vk_auto_calls_error",
                                 "Авто-режим: не удалось создать звонки VK (нет access token или ошибка VK)",
                                 99,
                                 true,
                             )
-                            launch(Dispatchers.Main) { stopTunnel() }
+                            launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
                             return@launch
                         }
 
+                        val domainWhite = store.domainIsWhitelist.first()
+                        val domainList = if (domainWhite) store.directDomainsWhite.first() else store.directDomainsBlack.first()
+                        val ipWhite = store.ipIsWhitelist.first()
+                        val ipList = if (ipWhite) store.directIpsWhite.first() else store.directIpsBlack.first()
+                        val hasDomains = if (domainWhite) domainList.isNotBlank() else (domainList.isNotBlank() || store.templateDomainsEnabled.first() || store.excludeRuZonesEnabled.first())
+                        val effectiveDomainEnabled = store.domainRoutingEnabled.first() && hasDomains
+                        val hasIps = ipList.isNotBlank()
+                        val effectiveIpEnabled = store.ipRoutingEnabled.first() && hasIps
+
                         val params = TunnelParams(
-                            peer = effectivePeer,
+                    proxyMode = store.proxyMode.first(),
+                    proxyPort = store.proxyPort.first(),
+                    proxyLanEnabled = store.proxyLanEnabled.first(),
+                    proxyUsername = store.proxyUsername.first(),
+                    proxyPassword = store.proxyPassword.first(),
+                            peer = intent.getStringExtra("peer") ?: "",
                             vkHashes = resolvedHashes.value,
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash") ?: "",
                             workersPerHash = workersPerHash,
                             port = intent.getIntExtra("port", 0),
                             sni = intent.getStringExtra("sni") ?: "",
-                            connectionPassword = connectionPassword,
+                            connectionPassword = intent.getStringExtra("connection_password") ?: "",
                             protocol = intent.getStringExtra("protocol") ?: "udp",
                             vkAuthMode = vkAuthMode,
                             captchaMode = sanitizeCaptchaMode(intent.getStringExtra("captcha_mode")),
                             captchaSolveMethod = intent.getStringExtra("captcha_solve_method") ?: "auto",
                             fingerprint = intent.getStringExtra("fingerprint") ?: "firefox",
-                            clientIds = intent.getStringExtra("client_ids") ?: "8202606,6287487",
+                            clientIds = intent.getStringExtra("client_ids") ?: CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS,
                             obfsMode = intent.getStringExtra("obfs_mode")
-                                ?.takeIf { it.isNotBlank() }
-                                ?.let { if (it == "mix" || it == "vkquic" || it == "callv2") "video" else it }
+                                ?.takeIf { it == "unified" }
                                 ?: CsqttConstants.Tunnel.DEFAULT_OBFS_MODE,
                             turnTransport = intent.getStringExtra("turn_transport")
                                 ?.takeIf { it == CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS }
                                 ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT,
+                            srtpMode = sanitizeSrtpMode(intent.getStringExtra("srtp_mode")),
+                            customTurnIps = intent.getStringExtra("custom_turn_ips") ?: "",
                             generationId = genId,
                             sessionSalt = salt,
                             allowHashRedistribution = resolvedHashes.allowWorkerRedistribution,
                             vkHashMode = resolvedHashes.mode,
                             vkAccessToken = resolvedHashes.accessToken,
-                            proxyMode = store.proxyMode.first(),
-                            proxyPort = store.proxyPort.first(),
+                            domainRoutingEnabled = effectiveDomainEnabled,
+                            domainIsWhitelist = domainWhite,
+                            excludeRuZones = if (domainWhite) false else store.excludeRuZonesEnabled.first(),
+                            templateDomains = if (domainWhite) false else store.templateDomainsEnabled.first(),
+                            directDomains = domainList,
+                            ipRoutingEnabled = effectiveIpEnabled,
+                            ipIsWhitelist = ipWhite,
+                            directIps = ipList,
                         )
                         launch(Dispatchers.Main) {
-                            startTunnel(params)
+                            if (isCurrentStart(requestGeneration)) startTunnel(params)
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         Log.e("TunnelService", "Unable to prepare tunnel start", e)
                         TunnelManager.updateLog(
@@ -271,7 +286,8 @@ class TunnelService : Service() {
                             99,
                             true,
                         )
-                        launch(Dispatchers.Main) { stopTunnel() }
+                        TunnelManager.starting.value = false
+                        launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
                     }
                 }
             }
@@ -279,6 +295,9 @@ class TunnelService : Service() {
                 autoPauseRequested = false
                 autoPausedForWifi = false
                 TunnelManager.leaveWifiAutoPause()
+                startJob?.cancel()
+                startJob = null
+                startGeneration++
                 stopTunnel(finishVkCalls = true)
             }
             CsqttConstants.General.ACTION_RESTART_WHEN_VK_REACHABLE -> verifyVkAndRestart()
@@ -342,6 +361,10 @@ class TunnelService : Service() {
     }
 
     private fun restoreTunnel(): Boolean {
+        startJob?.cancel()
+        val requestGeneration = ++startGeneration
+        isStopping = false
+        resourcesReleased = false
         TunnelManager.starting.value = true
         val notification = createNotification("Восстановление соединения...")
         if (!tryStartPersistentForeground(notification, "восстановление VPN")) {
@@ -351,13 +374,10 @@ class TunnelService : Service() {
         }
 
         val appContext = applicationContext
-        TunnelManager.scope.launch {
+        startJob = serviceScope.launch {
             try {
                 val store = SettingsStore(appContext)
 
-                // Проверяем: был ли CSQTT активен до перезапуска.
-                // Если нет — не поднимаем VPN: устройство может работать с другим VPN (напр. WireGuard).
-                // Android VPN API: при establish() всегда отзывает текущий VPN другого приложения.
                 val wasRunning = store.tunnelWasRunning.first()
                 if (!wasRunning) {
                     Log.d("TunnelService", "restoreTunnel: tunnelWasRunning=false, автостарт отменён — чужой VPN не нужно убивать")
@@ -369,57 +389,95 @@ class TunnelService : Service() {
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 if (reconcileWifiAutoPause()) return@launch
 
-                var source = resolveConnectionSource(store)
+                val source = resolveConnectionSource(store)
+                if (source == null) {
+                    TunnelManager.updateLog(
+                        "connection_source_error",
+                        "[ПОДКЛЮЧЕНИЕ] Не удалось разобрать сохранённую ссылку или найти адрес сервера. Откройте настройки подключения.",
+                        99,
+                        true,
+                    )
+                    launch(Dispatchers.Main) {
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
+                    }
+                    return@launch
+                }
+                if (
+                    !store.csqttLinkMode.first() &&
+                    store.connectionPasswordState.first().state == StoredSecretState.Unreadable
+                ) {
+                    TunnelManager.updateLog(
+                        "connection_secret_unreadable",
+                        "[ПОДКЛЮЧЕНИЕ] Не удалось прочитать сохранённый пароль подключения. Откройте настройки и введите его заново.",
+                        99,
+                        true,
+                    )
+                    launch(Dispatchers.Main) {
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
+                    }
+                    return@launch
+                }
                 val genId = store.reserveConnectionGeneration()
-                val salt = java.util.UUID.randomUUID().toString().replace("-", "")
-                val vkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
+                val salt = newTunnelSessionId()
+                val requestedVkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
                 val workersPerHash = WorkerCountPolicy.normalize(store.workersPerHash.first())
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
-                val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-                if (!awaitVkNetwork()) return@launch
-                val syncState = store.configSyncState()
-                val sourceBeforeSync = source
-                if (syncState.enabled && sourceBeforeSync != null) {
-                    ConfigSyncClient.fetch(sourceBeforeSync.peer, sourceBeforeSync.password, sourceBeforeSync.webPort)
-                        .onSuccess { remote ->
-                            if (!remote.active) {
-                                launch(Dispatchers.Main) { stopTunnel() }
-                                return@launch
-                            }
-                            source = sourceBeforeSync.copy(
-                                peer = ConfigSyncClient.withPeerPort(sourceBeforeSync.peer, remote.peerPort)
-                                    ?: sourceBeforeSync.peer,
-                                hashes = remote.vkHashes.ifEmpty { sourceBeforeSync.hashes },
-                                hashesFromLink = remote.vkHashes.isEmpty() && sourceBeforeSync.hashesFromLink,
-                            )
-                            store.saveSyncedConfig(
-                                remote.revision,
-                                remote.vkHashes,
-                                remote.peerPort,
-                                System.currentTimeMillis(),
-                            )
+                val configuredHashMode = store.vkHashMode.first()
+                val vkAuthMode = when {
+                    source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
+                    source.tokenFromLink -> {
+                        if (configuredHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
+                            CsqttConstants.VkAuth.MODE_AUTO_JS
+                        } else {
+                            if (requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) CsqttConstants.VkAuth.MODE_CALLS else requestedVkAuthMode
                         }
+                    }
+                    else -> requestedVkAuthMode
                 }
+                val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+                if (!awaitVkNetwork()) {
+                    TunnelManager.starting.value = false
+                    return@launch
+                }
+                if (!isCurrentStart(requestGeneration)) return@launch
                 val restoredHashes = when {
-                    source == null -> null
-                    source.hashesFromLink && !accountAutoJs -> ResolvedVkHashes(source.hashes, false)
+                    source.hashesFromLink && !source.tokenFromLink && !accountAutoJs -> ResolvedVkHashes(source.hashes, false)
                     else -> resolveAutoHashes(
                         store,
                         source.hashes,
                         workersPerHash,
-                        if (accountAutoJs) CsqttConstants.VkAutoHash.MODE_AUTO_JS else null,
+                        when {
+                            accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                            source.tokenFromLink -> CsqttConstants.VkAutoHash.MODE_AUTO_API
+                            else -> null
+                        },
+                        source.vkAccessToken.takeIf { source.tokenFromLink },
+                        tokenFromLink = source.tokenFromLink,
                     )
                 }
+                val domainWhite = store.domainIsWhitelist.first()
+                val domainList = if (domainWhite) store.directDomainsWhite.first() else store.directDomainsBlack.first()
+                val ipWhite = store.ipIsWhitelist.first()
+                val ipList = if (ipWhite) store.directIpsWhite.first() else store.directIpsBlack.first()
+                val ipRouting = store.ipRoutingEnabled.first() || ipList.isNotBlank()
+
                 val params = TunnelParams(
-                    peer = source?.peer.orEmpty(),
+                    proxyMode = store.proxyMode.first(),
+                    proxyPort = store.proxyPort.first(),
+                    proxyLanEnabled = store.proxyLanEnabled.first(),
+                    proxyUsername = store.proxyUsername.first(),
+                    proxyPassword = store.proxyPassword.first(),
+                    peer = source.peer,
                     vkHashes = restoredHashes?.value ?: "",
                     secondaryVkHash = store.secondaryVkHash.first(),
                     workersPerHash = workersPerHash,
                     port = 0,
                     sni = store.sni.first(),
-                    connectionPassword = source?.password.orEmpty(),
+                    connectionPassword = source.password,
                     obfsMode = store.obfsMode.first(),
                     turnTransport = store.turnTransport.first(),
+                    srtpMode = sanitizeSrtpMode(store.srtpMode.first()),
+                    customTurnIps = store.customTurnIps.first(),
                     vkAuthMode = vkAuthMode,
                     captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
                     captchaSolveMethod = store.captchaSolveMethod.first(),
@@ -430,8 +488,17 @@ class TunnelService : Service() {
                     allowHashRedistribution = restoredHashes?.allowWorkerRedistribution == true,
                     vkHashMode = restoredHashes?.mode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
                     vkAccessToken = restoredHashes?.accessToken.orEmpty(),
-                    proxyMode = store.proxyMode.first(),
-                    proxyPort = store.proxyPort.first(),
+                    domainRoutingEnabled = store.domainRoutingEnabled.first() ||
+                        (!domainWhite && store.templateDomainsEnabled.first()) ||
+                        domainList.isNotBlank() ||
+                        (!domainWhite && store.excludeRuZonesEnabled.first()),
+                    domainIsWhitelist = domainWhite,
+                    excludeRuZones = if (domainWhite) false else store.excludeRuZonesEnabled.first(),
+                    templateDomains = if (domainWhite) false else store.templateDomainsEnabled.first(),
+                    directDomains = domainList,
+                    ipRoutingEnabled = ipRouting,
+                    ipIsWhitelist = ipWhite,
+                    directIps = ipList,
                 )
                 if (
                     params.peer.isNotEmpty() &&
@@ -441,16 +508,31 @@ class TunnelService : Service() {
                     )
                 ) {
                     launch(Dispatchers.Main) {
-                        startTunnel(params)
+                        if (isCurrentStart(requestGeneration)) startTunnel(params)
                     }
                 } else {
+                    TunnelManager.updateLog(
+                        "connection_credentials_error",
+                        "[ПОДКЛЮЧЕНИЕ] В ссылке и настройках нет действующих VK-хэшей или VK-токена.",
+                        99,
+                        true,
+                    )
                     launch(Dispatchers.Main) {
-                        stopTunnel()
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                Log.e("TunnelService", "Unable to restore tunnel", e)
+                TunnelManager.updateLog(
+                    "service_restore_error",
+                    "Ошибка восстановления VPN: ${e.message ?: e.javaClass.simpleName}",
+                    99,
+                    true,
+                )
                 launch(Dispatchers.Main) {
-                    stopTunnel()
+                    if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                 }
             }
         }
@@ -462,11 +544,18 @@ class TunnelService : Service() {
         fallbackHashes: String,
         workersPerHash: Int,
         forcedMode: String? = null,
+        accessTokenOverride: String? = null,
+        tokenFromLink: Boolean = false,
     ): ResolvedVkHashes? {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
-                val token = store.vkAccessToken.first()
-                val result = VkAutoCallsManager.startAutoCalls(applicationContext, token, workersPerHash)
+                val token = accessTokenOverride ?: store.vkAccessToken.first()
+                val result = VkAutoCallsManager.startAutoCalls(
+                    applicationContext,
+                    token,
+                    workersPerHash,
+                    clearStoredTokenOnInvalid = !tokenFromLink,
+                )
                     ?: return null
                 ResolvedVkHashes(
                     result.hashes,
@@ -476,7 +565,7 @@ class TunnelService : Service() {
             }
 
             CsqttConstants.VkAutoHash.MODE_AUTO_JS -> {
-                val token = store.vkAccessToken.first()
+                val token = accessTokenOverride ?: store.vkAccessToken.first()
                 if (token.isBlank()) return null
                 ResolvedVkHashes(
                     "",
@@ -501,16 +590,15 @@ class TunnelService : Service() {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
                 val store = SettingsStore(applicationContext)
                 val vkHashMode = store.vkHashMode.first()
-                if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL) {
+                val source = resolveConnectionSource(store) ?: return@launch
+                if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL && !source.tokenFromLink) {
                     return@launch
                 }
-                val source = resolveConnectionSource(store) ?: return@launch
-                val accountAutoJs = previous.vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+                val accountAutoJs = previous.vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS ||
+                    (source.tokenFromLink && vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS)
                 val workers = WorkerCountPolicy.normalize(
                     store.workersPerHash.first(),
-                    maximum = WorkerCountPolicy.defaultMaximum(
-                        !accountAutoJs && store.extraWorkers.first(),
-                    ),
+                    maximum = CsqttConstants.Tunnel.MAX_WORKERS,
                 )
                 val resolved = when {
                     accountAutoJs -> resolveAutoHashes(
@@ -518,11 +606,16 @@ class TunnelService : Service() {
                         fallbackHashes = "",
                         workersPerHash = workers,
                         forcedMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
+                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
+                        tokenFromLink = source.tokenFromLink,
                     )
-                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API -> resolveAutoHashes(
+                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API || source.tokenFromLink -> resolveAutoHashes(
                         store,
                         fallbackHashes = source.hashes,
                         workersPerHash = workers,
+                        forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
+                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
+                        tokenFromLink = source.tokenFromLink,
                     )
                     else -> ResolvedVkHashes(source.hashes, false)
                 } ?: return@launch
@@ -542,8 +635,9 @@ class TunnelService : Service() {
                     vkHashes = resolved.value,
                     workersPerHash = workers,
                     connectionPassword = source.password,
+                    vkAuthMode = if (accountAutoJs) CsqttConstants.VkAuth.MODE_AUTO_JS else previous.vkAuthMode,
                     generationId = nextGeneration,
-                    sessionSalt = java.util.UUID.randomUUID().toString().replace("-", ""),
+                    sessionSalt = newTunnelSessionId(),
                     allowHashRedistribution = resolved.allowWorkerRedistribution,
                     vkHashMode = resolved.mode,
                     vkAccessToken = resolved.accessToken,
@@ -574,7 +668,11 @@ class TunnelService : Service() {
         }
     }
 
+    private fun isCurrentStart(generation: Long): Boolean =
+        generation == startGeneration && !isStopping && serviceJob.isActive
+
     private fun startTunnel(params: TunnelParams) {
+        if (isStopping || !serviceJob.isActive) return
         autoPauseRequested = true
         if (autoPauseOnWifiEnabled && hasPhysicalWifiNetwork()) {
             serviceScope.launch { reconcileWifiAutoPause() }
@@ -586,7 +684,6 @@ class TunnelService : Service() {
 
         CaptchaWebViewManager.onTunnelStart(applicationContext)
 
-        // Сохраняем: пользователь явно запустил CSQTT — авторестарт при холодном старте разрешён
         serviceScope.launch {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(true) }
         }
@@ -598,81 +695,7 @@ class TunnelService : Service() {
         TunnelManager.scope.launch(Dispatchers.Main) {
             VkAutoCallsManager.replayPendingLogs()
         }
-        scheduleConfigSync()
         startStatsUpdater()
-    }
-
-    private fun scheduleConfigSync() {
-        configSyncJob?.cancel()
-        configSyncJob = serviceScope.launch {
-            while (isActive) {
-                delay(CsqttConstants.ConfigSync.INTERVAL_MS)
-                val current = TunnelManager.getCurrentParams() ?: continue
-                val store = SettingsStore(applicationContext)
-                val previous = store.configSyncState()
-                if (!previous.enabled) continue
-                val webPort = ConfigSyncClient.peerHost(current.peer)?.let { previousWebHost ->
-                    val source = resolveConnectionSource(store)
-                    source?.webPort?.takeIf { ConfigSyncClient.peerHost(source.peer) == previousWebHost }
-                } ?: store.serverWebPort.first()
-                ConfigSyncClient.fetch(current.peer, current.connectionPassword, webPort)
-                    .onSuccess { remote ->
-                        if (!remote.active) {
-                            TunnelManager.updateLog(
-                                "config_sync_inactive",
-                                "Сервер отключил эту конфигурацию",
-                                99,
-                                true,
-                            )
-                            launch(Dispatchers.Main) { stopTunnel() }
-                            return@onSuccess
-                        }
-                        store.saveSyncedConfig(
-                            revision = remote.revision,
-                            vkHashes = remote.vkHashes,
-                            peerPort = remote.peerPort,
-                            checkedAt = System.currentTimeMillis(),
-                        )
-                        if (remote.revision == previous.revision) return@onSuccess
-                        val nextPeer = ConfigSyncClient.withPeerPort(current.peer, remote.peerPort)
-                            ?: current.peer
-                        val nextHashes = if (
-                            current.vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL &&
-                            remote.vkHashes.isNotEmpty()
-                        ) {
-                            remote.vkHashes
-                        } else {
-                            current.vkHashes
-                        }
-                        val nextGeneration = store.reserveConnectionGeneration(
-                            if (current.generationId == Long.MAX_VALUE) Long.MAX_VALUE else current.generationId + 1,
-                        )
-                        val next = current.copy(
-                            peer = nextPeer,
-                            vkHashes = nextHashes,
-                            generationId = nextGeneration,
-                            sessionSalt = java.util.UUID.randomUUID().toString().replace("-", ""),
-                        )
-                        TunnelManager.updateLog(
-                            "config_sync_changed",
-                            "Конфигурация сервера изменилась · переподключение",
-                            40,
-                            false,
-                        )
-                        launch(Dispatchers.Main) {
-                            TunnelManager.start(applicationContext, next, isSwitching = true)
-                        }
-                    }
-                    .onFailure { error ->
-                        TunnelManager.updateLog(
-                            "config_sync_periodic_error",
-                            "Обновление конфигурации отложено: ${error.message ?: error.javaClass.simpleName}",
-                            58,
-                            false,
-                        )
-                    }
-            }
-        }
     }
 
     private fun registerPhysicalNetworkCallback() {
@@ -769,48 +792,56 @@ class TunnelService : Service() {
 
     private fun probeVkThrough(network: Network): Boolean = VK_PROBE_URLS.any { address ->
         val url = URL(address)
-        probeVkWithFallback(
-            bound = { probeVkRequest { network.openConnection(url) as HttpURLConnection } },
-            isCurrentNetwork = {
-                runCatching { connectivityManager.activeNetwork == network }.getOrDefault(false)
-            },
-            unbound = { probeVkRequest { url.openConnection() as HttpURLConnection } },
-        )
+        probeVkRequest { network.openConnection(url) as HttpURLConnection }
+            ?: probeVkUnboundFallback(network, url)
     }
 
-    // null means an I/O failure; an HTTP verdict never triggers a fallback.
+    private fun probeVkUnboundFallback(network: Network, url: URL): Boolean {
+        val active = runCatching { connectivityManager.activeNetwork }.getOrNull()
+        if (active != null && active != network) return false
+        return probeVkRequest { url.openConnection() as HttpURLConnection } ?: false
+    }
+
     private fun probeVkRequest(open: () -> HttpURLConnection): Boolean? {
-        var connection: HttpURLConnection? = null
+        val connection = runCatching(open).getOrNull() ?: return null
         return try {
-            val request = open()
-            connection = request
-            request.instanceFollowRedirects = false
-            request.connectTimeout = VK_PROBE_CONNECT_TIMEOUT_MS
-            request.readTimeout = VK_PROBE_READ_TIMEOUT_MS
-            request.useCaches = false
-            request.requestMethod = "GET"
-            request.setRequestProperty("Connection", "close")
-            request.setRequestProperty("Range", "bytes=0-0")
-            request.setRequestProperty("Accept-Encoding", "identity")
-            request.setRequestProperty("User-Agent", "Mozilla/5.0")
-            isVkProbeHttpResponse(request.responseCode)
-        } catch (_: java.io.IOException) {
-            null
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = VK_PROBE_CONNECT_TIMEOUT_MS
+            connection.readTimeout = VK_PROBE_READ_TIMEOUT_MS
+            connection.useCaches = false
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Connection", "close")
+            connection.setRequestProperty("Range", "bytes=0-0")
+            connection.setRequestProperty("Accept-Encoding", "identity")
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+            isVkProbeHttpResponse(connection.responseCode)
         } catch (_: Exception) {
-            false
+            null
         } finally {
-            connection?.disconnect()
+            connection.disconnect()
         }
     }
 
     private suspend fun awaitVkNetwork(): Boolean {
-        while (serviceScope.coroutineContext[Job]?.isActive != false) {
+        val deadline = SystemClock.elapsedRealtime() + 60_000L
+        while (
+            serviceScope.coroutineContext[Job]?.isActive != false &&
+            SystemClock.elapsedRealtime() < deadline
+        ) {
             if (physicalNetworks.hasUsableNetwork()) return true
             currentPhysicalCandidates().forEach { network ->
                 rememberPhysicalCandidate(network)
                 startVkNetworkProbe(network)
             }
             delay(250)
+        }
+        if (serviceScope.coroutineContext[Job]?.isActive != false) {
+            TunnelManager.updateLog(
+                "vk_network_timeout",
+                "[СЕТЬ] Не удалось дождаться доступной сети VK за 60 секунд.",
+                99,
+                true,
+            )
         }
         return false
     }
@@ -843,11 +874,6 @@ class TunnelService : Service() {
                     }
                     return@launch
                 }
-                // A failed HTTP probe is not Android reporting that the radio
-                // disappeared. TURN can transiently time out while HTTPS is
-                // rate-limited or the VK endpoint is busy. Keep the existing
-                // physical network usable and let the core recover workers;
-                // only NetworkCallback.onLost is allowed to pause the tunnel.
                 candidates.forEach { network ->
                     rememberPhysicalCandidate(network)
                     startVkNetworkProbe(network)
@@ -870,9 +896,6 @@ class TunnelService : Service() {
                     updatePhysicalNetwork(ready, true)
                     return@launch
                 }
-                // Do not turn a failed VK reachability probe into a global
-                // PAUSE. The callback still delivers a real physical-network
-                // loss through forgetPhysicalNetwork/onLost.
                 candidates.forEach { network ->
                     rememberPhysicalCandidate(network)
                     startVkNetworkProbe(network)
@@ -896,9 +919,7 @@ class TunnelService : Service() {
                 networkSwapJob?.cancel()
                 schedulePhysicalNetworkLossCheck()
             }
-            PhysicalNetworkTransition.CHANGED -> {
-                scheduleNetworkSwapRestart()
-            }
+            PhysicalNetworkTransition.CHANGED -> Unit
             PhysicalNetworkTransition.NONE -> Unit
         }
     }
@@ -909,9 +930,6 @@ class TunnelService : Service() {
             delay(NETWORK_LOSS_GRACE_MS)
             if (physicalNetworks.hasUsableNetwork() || autoPausedForWifi) return@launch
 
-            // A replacement Network can already be the system default even if
-            // its callback arrived out of order. Start its probe rather than
-            // emitting a false "network disconnected" state.
             currentPhysicalCandidates().forEach { network ->
                 rememberPhysicalCandidate(network)
                 startVkNetworkProbe(network)
@@ -923,19 +941,6 @@ class TunnelService : Service() {
             job.invokeOnCompletion {
                 if (networkLossJob === job) networkLossJob = null
             }
-        }
-    }
-
-    private fun scheduleNetworkSwapRestart() {
-        if (autoPausedForWifi) return
-        // Wi-Fi/cellular sets flap; each CHANGED used to tear the whole tunnel
-        // down. Coalesce a flapping burst into one restart after it settles.
-        networkSwapJob?.cancel()
-        networkSwapJob = serviceScope.launch {
-            delay(NETWORK_SWAP_SETTLE_MS)
-            networkSwapJob = null
-            if (!physicalNetworks.hasUsableNetwork()) return@launch
-            TunnelManager.restartForNetworkSwap(applicationContext)
         }
     }
 
@@ -973,6 +978,9 @@ class TunnelService : Service() {
         }.getOrDefault(false)
 
     private fun stopTunnel(finishVkCalls: Boolean = false) {
+        startJob?.cancel()
+        startJob = null
+        startGeneration++
         if (isStopping) return
         isStopping = true
         stopWifiAutoPauseWatch()
@@ -981,9 +989,6 @@ class TunnelService : Service() {
         TunnelManager.leaveWifiAutoPause()
         TunnelManager.starting.value = false
         updateJob?.cancel()
-        configSyncJob?.cancel()
-        configSyncJob = null
-        // Сохраняем: пользователь явно остановил CSQTT — авторестарт при холодном старте запрещён
         serviceScope.launch {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(false) }
         }
@@ -1006,7 +1011,7 @@ class TunnelService : Service() {
         resourcesReleased = true
         stopWifiAutoPauseWatch()
         CaptchaWebViewManager.onTunnelStop()
-        if (finishVkCalls) VkAutoCallsManager.finishActiveCalls(applicationContext)
+        if (finishVkCalls) VkAutoCallsManager.finishActiveCalls()
         TunnelManager.stop(finishVkCalls)
         releaseWakeLock()
         releaseWifiLock()
@@ -1018,6 +1023,35 @@ class TunnelService : Service() {
             SettingsStore(applicationContext).autoPauseOnWifi.collect { enabled ->
                 autoPauseOnWifiEnabled = enabled
                 reconcileWifiAutoPause()
+            }
+        }
+    }
+
+    private fun observeDomainRoutingSettings() {
+        domainRoutingSettingsJob?.cancel()
+        domainRoutingSettingsJob = serviceScope.launch {
+            val store = SettingsStore(applicationContext)
+            combine(
+                store.domainRoutingEnabled,
+                store.excludeRuZonesEnabled,
+                store.templateDomainsEnabled,
+                store.directDomains,
+            ) { domainEnabled, excludeRu, templateEnabled, domains ->
+                DomainRoutingUpdate(
+                    enabled = domainEnabled || templateEnabled || domains.isNotBlank() || excludeRu,
+                    excludeRuZones = excludeRu,
+                    templateDomains = templateEnabled,
+                    directDomains = domains,
+                )
+            }.distinctUntilChanged().collect { update ->
+                if (TunnelManager.running.value && !TunnelManager.serverRoutingActive.value) {
+                    TunnelManager.updateDomainRouting(
+                        enabled = update.enabled,
+                        excludeRuZones = update.excludeRuZones,
+                        templateDomains = update.templateDomains,
+                        directDomains = update.directDomains,
+                    )
+                }
             }
         }
     }
@@ -1054,6 +1088,9 @@ class TunnelService : Service() {
         networkSwapJob = null
         vkRecoveryJob?.cancel()
         vkRecoveryJob = null
+        startJob?.cancel()
+        startJob = null
+        startGeneration++
         synchronized(vkProbeLock) {
             vkProbeJobs.values.forEach(Job::cancel)
             vkProbeJobs.clear()
@@ -1168,16 +1205,27 @@ class TunnelService : Service() {
         }
     }
 
+    private fun sanitizeSrtpMode(mode: String?): String {
+        return when (mode?.lowercase()) {
+            CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
+            CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
+            else -> CsqttConstants.SrtpMode.AUTO
+        }
+    }
+
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
+        val now = SystemClock.elapsedRealtime()
+        if (wakeLock?.isHeld == true && now < wakeLockExpiresAtElapsedMs - WAKE_LOCK_RENEWAL_WINDOW_MS) return
+        if (wakeLock?.isHeld == true) wakeLock?.release()
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "csqtt:tunnel_cpu"
         ).apply {
             setReferenceCounted(false)
-            acquire()
+            acquire(WAKE_LOCK_TIMEOUT_MS)
         }
+        wakeLockExpiresAtElapsedMs = now + WAKE_LOCK_TIMEOUT_MS
     }
 
     @Suppress("DEPRECATION")
@@ -1185,8 +1233,6 @@ class TunnelService : Service() {
         if (wifiLock?.isHeld == true) return
         val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
 
-        // HIGH_PERF keeps Wi-Fi awake without forcing the radio into
-        // low-latency mode, which burns battery for no VPN benefit.
         wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "csqtt:wifi_perf").apply {
             setReferenceCounted(false)
             acquire()
@@ -1198,6 +1244,7 @@ class TunnelService : Service() {
             wakeLock?.release()
         }
         wakeLock = null
+        wakeLockExpiresAtElapsedMs = 0L
     }
 
     private fun releaseWifiLock() {
@@ -1216,8 +1263,6 @@ class TunnelService : Service() {
             while (isActive) {
                 val running = TunnelManager.running.value
                 wasEverUp = wasEverUp || running || TunnelManager.processStartedAtMs > 0L
-                // Locks are held for the whole session; this only re-arms one
-                // that the system dropped (GC of a dead service, OEM killer).
                 if (running) {
                     acquireWakeLock()
                     acquireWifiLock()
@@ -1333,7 +1378,11 @@ class TunnelService : Service() {
         lastNotificationText = text
         lastNotificationPostElapsedMs = now
         val notification = createNotification(text)
-        startPersistentForeground(notification)
+        if (foregroundStarted) {
+            getSystemService(NotificationManager::class.java).notify(TUNNEL_NOTIFICATION_ID, notification)
+        } else {
+            startPersistentForeground(notification)
+        }
     }
 
     private fun isNotificationVisible(): Boolean {
@@ -1346,8 +1395,13 @@ class TunnelService : Service() {
 
     override fun onDestroy() {
         isStopping = true
+        startJob?.cancel()
+        startJob = null
+        startGeneration++
         autoPauseSettingsJob?.cancel()
         autoPauseSettingsJob = null
+        domainRoutingSettingsJob?.cancel()
+        domainRoutingSettingsJob = null
         stopWifiAutoPauseWatch()
         updateJob?.cancel()
         networkSwapJob?.cancel()
@@ -1361,7 +1415,7 @@ class TunnelService : Service() {
             vkProbeJobs.clear()
             physicalCandidates.clear()
         }
-        releaseTunnelResources()
+        releaseTunnelResources(finishVkCalls = true)
         if (foregroundStarted) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundStarted = false
@@ -1384,6 +1438,11 @@ class TunnelService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-
 }
+
+private data class DomainRoutingUpdate(
+    val enabled: Boolean,
+    val excludeRuZones: Boolean,
+    val templateDomains: Boolean,
+    val directDomains: String,
+)

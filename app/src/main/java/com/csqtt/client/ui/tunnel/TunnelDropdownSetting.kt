@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ButtonDefaults
@@ -85,6 +86,7 @@ internal fun CompactDropdownSetting(
     modifier: Modifier = Modifier,
     onTitleInfo: (() -> Unit)? = null,
     onInfo: ((String) -> Unit)? = null,
+    onItemEdit: ((String) -> Unit)? = null,
     leadingContent: (@Composable RowScope.() -> Unit)? = null,
     indicatorProvider: ((String) -> ModeIndicator?)? = null,
 ) {
@@ -188,22 +190,40 @@ internal fun CompactDropdownSetting(
                                 }
                             }
                         },
-                        trailingIcon = if (onInfo != null) {
+                        trailingIcon = if (onItemEdit != null || onInfo != null) {
                             {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(
-                                        onClick = {
-                                            expanded = false
-                                            onInfo(key)
-                                        },
-                                        modifier = Modifier.size(32.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.HelpOutline,
-                                            contentDescription = "Информация: $label",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(18.dp),
-                                        )
+                                    if (onItemEdit != null) {
+                                        IconButton(
+                                            onClick = {
+                                                expanded = false
+                                                onItemEdit(key)
+                                            },
+                                            modifier = Modifier.size(32.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Edit,
+                                                contentDescription = "Редактировать: $label",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
+                                    }
+                                    if (onInfo != null) {
+                                        IconButton(
+                                            onClick = {
+                                                expanded = false
+                                                onInfo(key)
+                                            },
+                                            modifier = Modifier.size(32.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.HelpOutline,
+                                                contentDescription = "Информация: $label",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
                                     }
                                 }
                             }

@@ -1,0 +1,37 @@
+{
+  "schema": "csqtt.server-asset-provenance.v2",
+  "runtime": "rust",
+  "package": "csqtt",
+  "version": "2.5.0-dev.1",
+  "wireProtocolRevision": "CSQTT-WIRE-4",
+  "buildInputSha256": "13062604E4C38A6ED2ED0394FE21A45C2AB106D4B468D300917F1CDED921C0B9",
+  "cargoTomlSha256": "B22645A3B8D90EE95C541E535724D6B0B71C138885936F27D93E96A1E3E7789A",
+  "cargoLockSha256": "05CCA413E1BD618AAE5D9E423BA6D30BAB5A09688A14238F63AB328D6409FFFE",
+  "artifacts": [
+    {
+      "assetName": "csqtt-linux-amd64",
+      "target": "x86_64-unknown-linux-musl",
+      "elfClass": 2,
+      "elfMachine": 62,
+      "binarySize": 11052440,
+      "binarySha256": "7213EB74A52494809B5CC2CC11C5CF907C31A82E134BBB9D6276E30680859348"
+    },
+    {
+      "assetName": "csqtt-linux-arm64",
+      "target": "aarch64-unknown-linux-musl",
+      "elfClass": 2,
+      "elfMachine": 183,
+      "binarySize": 9359224,
+      "binarySha256": "EEE8E7CDD8D423176E365EB1A50DAC1E307BE0A4B2ABE62749033CB92DACD293"
+    },
+    {
+      "assetName": "csqtt-linux-armv7",
+      "target": "armv7-unknown-linux-musleabihf",
+      "elfClass": 1,
+      "elfMachine": 40,
+      "binarySize": 8646892,
+      "binarySha256": "17DA4E91390BBE15EFF6C8593EA1F6CBF724A99453759114DC7291874153FF68"
+    }
+  ],
+  "generatedAtUtc": "2026-10-21T15:24:49.564898+00:00"
+}

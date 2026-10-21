@@ -35,11 +35,13 @@ import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.*
@@ -67,12 +69,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import com.csqtt.client.ui.AppUpdateDialog
 import com.csqtt.client.ui.ConnectionTab
+import com.csqtt.client.ui.ExceptionsTab
 import com.csqtt.client.ui.FloatingToolbar
 import com.csqtt.client.ui.LogsTab
 import com.csqtt.client.ui.SettingsTab
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.ui.DeployTab
-import com.csqtt.client.ui.ExceptionsTab
+import com.csqtt.client.ui.InfoTab
 import com.csqtt.client.ui.components.LocalCsqttHeaderActions
 import com.csqtt.client.ui.design.CsqttMotion
 import com.csqtt.client.ui.design.CsqttShapes
@@ -194,11 +197,23 @@ class MainActivity : ComponentActivity() {
 
     private fun importCsqttLink(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
-        val link = intent.dataString?.takeIf { parseCsqttLink(it) != null } ?: return
-        lifecycleScope.launch {
-            appSettingsStore.saveCsqttLink(link)
-            appSettingsStore.saveCsqttLinkMode(true)
+        val raw = intent.dataString ?: return
+        val link = parseCsqttLink(raw)
+        if (link == null) {
+            showRaisedToast("Неверная ссылка CSQTT", Toast.LENGTH_SHORT)
+            return
         }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Импорт конфигурации CSQTT")
+            .setMessage("Хост: ${link.host}\nPeer: ${link.port}\n\nЗаменить текущую конфигурацию?")
+            .setPositiveButton("Импортировать") { _, _ ->
+                lifecycleScope.launch {
+                    appSettingsStore.saveCsqttParticipantLink(raw)
+                    showRaisedToast("Конфигурация CSQTT успешно подключена", Toast.LENGTH_SHORT)
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun checkAndRequestNotifications() {
@@ -258,14 +273,25 @@ private val navItems = listOf(
     NavItem(0, R.string.nav_connection, Icons.Filled.PowerSettingsNew, Icons.Filled.PowerSettingsNew),
     NavItem(1, R.string.nav_tunnel, Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
     NavItem(2, R.string.nav_deploy, Icons.Filled.Cloud, Icons.Outlined.Cloud),
-    NavItem(3, R.string.nav_exceptions, Icons.Filled.FilterList, Icons.Outlined.FilterList),
-    NavItem(4, R.string.nav_logs, Icons.Filled.Terminal, Icons.Outlined.Terminal),
+    NavItem(3, R.string.nav_logs, Icons.Filled.Terminal, Icons.Outlined.Terminal),
+    NavItem(4, R.string.nav_exceptions, Icons.Filled.FilterList, Icons.Outlined.FilterList),
 )
 
 internal fun navigationSwipeProgress(totalDrag: Float, containerWidth: Int): Float =
     if (containerWidth <= 0) 0f else (abs(totalDrag) / (containerWidth.toFloat() * 0.25f)).coerceIn(0f, 1f)
 
 internal fun shouldCommitNavigationSwipe(progress: Float): Boolean = progress > 0.4f
+
+internal fun resolveActiveNavIds(csqttLinkMode: Boolean, participantShowLogs: Boolean): List<Int> {
+    val allIds = listOf(0, 1, 2, 3, 4)
+    return allIds.filter { id ->
+        if (csqttLinkMode) {
+            if (id == 2) return@filter false
+            if (id == 3 && !participantShowLogs) return@filter false
+        }
+        true
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -291,16 +317,23 @@ fun MainScreen(
     val tunnelAuthSettings by settingsStore.tunnelAuthSnapshot.collectAsStateWithLifecycle(
         initialValue = TunnelAuthSnapshot()
     )
-    val csqttLinkMode by settingsStore.csqttLinkMode.collectAsStateWithLifecycle(initialValue = false)
+    val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
+    val participantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = false)
     val autoPauseOnWifi by settingsStore.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
-    val excludedApps by settingsStore.excludedApps.collectAsStateWithLifecycle(initialValue = "")
+    val excludedApps by settingsStore.excludedApps.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.cachedExcludedApps ?: ""
+    )
+    val whitelistApps by settingsStore.whitelistApps.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.cachedWhitelistApps ?: ""
+    )
     val showSystemApps by settingsStore.showSystemApps.collectAsStateWithLifecycle(initialValue = false)
-    val isWhitelist by settingsStore.isWhitelist.collectAsStateWithLifecycle(initialValue = false)
+    val isWhitelist by settingsStore.isWhitelist.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.cachedIsWhitelist ?: false
+    )
+    val infoActionsExpanded by settingsStore.infoActionsExpanded.collectAsStateWithLifecycle(initialValue = false)
+    val infoProjectExpanded by settingsStore.infoProjectExpanded.collectAsStateWithLifecycle(initialValue = false)
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
-    // Held as State objects and read only inside ProxyNavigationBar: a swipe
-    // writes these on every pointer event, and delegating reads here would
-    // recompose the whole MainScreen (tabs included) per event.
     val dragTargetIndex = remember { mutableIntStateOf(-1) }
     val dragProgress = remember { mutableFloatStateOf(0f) }
     var wasRunning by remember { mutableStateOf(tunnelRunning) }
@@ -316,16 +349,22 @@ fun MainScreen(
     val navOverlayReserve = safeBottomInset + navToolbarBottomMargin + navToolbarHeight + navContentGap
     val navigationDragSlop = with(density) { 6.dp.toPx() }
 
-    val activeNavItems = remember(csqttLinkMode) {
-        if (csqttLinkMode) {
-            navItems.filter { it.id != 2 }
-        } else {
-            navItems
-        }
+    val serverRoutingActive by TunnelManager.serverRoutingActive.collectAsStateWithLifecycle()
+
+    val activeNavItems = remember(csqttLinkMode, participantShowLogs) {
+        val allowedIds = resolveActiveNavIds(csqttLinkMode, participantShowLogs)
+        navItems.filter { it.id in allowedIds }
     }
     val tabStateHolder = rememberSaveableStateHolder()
-    LaunchedEffect(csqttLinkMode) {
-        if (csqttLinkMode && selectedTab == 2) {
+    LaunchedEffect(csqttLinkMode, participantShowLogs) {
+        if (csqttLinkMode) {
+            if (selectedTab == 2 || (selectedTab == 3 && !participantShowLogs)) {
+                selectedTab = 0
+            }
+        }
+    }
+    LaunchedEffect(activeNavItems) {
+        if (activeNavItems.none { it.id == selectedTab }) {
             selectedTab = 0
         }
     }
@@ -338,7 +377,7 @@ fun MainScreen(
     }
 
     LaunchedEffect(selectedTab) {
-        if (selectedTab == 4) TunnelManager.clearUnreadErrors()
+        if (selectedTab == 3) TunnelManager.clearUnreadErrors()
     }
 
     LaunchedEffect(updateCheckIntervalHours) {
@@ -423,7 +462,7 @@ fun MainScreen(
                         .fillMaxSize()
                         .padding(padding)
                         .consumeWindowInsets(padding)
-                        .pointerInput(selectedTab, csqttLinkMode) {
+                        .pointerInput(selectedTab, csqttLinkMode, participantShowLogs) {
                         var totalDrag = 0f
                         detectHorizontalDragGestures(
                             onDragStart = {
@@ -438,7 +477,7 @@ fun MainScreen(
                             onDragEnd = {
                                 if (dragTargetIndex.intValue in activeNavItems.indices && shouldCommitNavigationSwipe(dragProgress.floatValue)) {
                                     selectedTab = activeNavItems[dragTargetIndex.intValue].id
-                                    if (selectedTab == 4) TunnelManager.clearUnreadErrors()
+                                    if (selectedTab == 3) TunnelManager.clearUnreadErrors()
                                 }
                                 dragTargetIndex.intValue = -1
                                 dragProgress.floatValue = 0f
@@ -507,13 +546,20 @@ fun MainScreen(
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
-                                3 -> ExceptionsTab(
+                                3 -> if (!csqttLinkMode || participantShowLogs) {
+                                    LogsTab(settingsStore)
+                                } else {
+                                    Spacer(modifier = Modifier.fillMaxSize())
+                                }
+                                4 -> ExceptionsTab(
                                     settingsStore = settingsStore,
                                     savedExcluded = excludedApps,
+                                    savedWhitelist = whitelistApps,
                                     showSystemApps = showSystemApps,
                                     isWhitelist = isWhitelist,
+                                    serverRoutingActive = serverRoutingActive,
                                 )
-                                4 -> LogsTab(settingsStore)
+                                else -> Spacer(modifier = Modifier.fillMaxSize())
                                 }
                             }
                         }
@@ -530,7 +576,7 @@ fun MainScreen(
                             if (selectedTab != index) {
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 selectedTab = index
-                                if (index == 4) TunnelManager.clearUnreadErrors()
+                                if (index == 3) TunnelManager.clearUnreadErrors()
                             }
                             dragTargetIndex.intValue = -1
                             dragProgress.floatValue = 0f
@@ -569,6 +615,7 @@ fun MainScreen(
                         action = UPDATE_DIALOG_ACTION_UPDATE,
                         actedAt = System.currentTimeMillis()
                     )
+                    openReleaseUrl(context, release.releaseUrl)
                 }
             }
         )
@@ -693,7 +740,7 @@ private fun ProxyNavigationBar(
                                     modifier = Modifier.size(22.dp),
                                     tint = iconColor
                                 )
-                                if (item.id == 4 && unreadErrors > 0) {
+                                if (item.id == 3 && unreadErrors > 0) {
                                     Badge(
                                         containerColor = if (tunnelRunning) colors.primary else CSQTTColors.warning,
                                         contentColor = colors.onPrimary,
@@ -716,5 +763,16 @@ private fun ProxyNavigationBar(
                 }
             }
         }
+    }
+}
+
+private fun openReleaseUrl(context: Context, url: String) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, url.toUri()).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        context.showRaisedToast("Не удалось открыть ссылку", Toast.LENGTH_SHORT)
     }
 }

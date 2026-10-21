@@ -21,9 +21,17 @@
 - Поддержать разработку: [Boosty](https://boosty.to/danusha/donate)
 - Исходный проект: [`amurcanov/csqtt`](https://github.com/amurcanov/csqtt)
 
-## Актуальный релиз
+## Ветка интеграции 2.5
 
-Версия Android: **2.1.17**, package ID `io.github.danusha2345.csqtt`.
+В `feature/upstream-2.5-all` собраны Android, сервер и OpenWrt `2.5.0-dev.1`.
+Нужны клиенты и сервер этой ветки с `CSQTT-WIRE-4`; совместимость со старой
+линией и сервером upstream не сохраняется. Это локальная тестовая сборка,
+публикация и деплой не выполнялись. Объём изменений и проверок:
+[интеграция 2.5](docs/UPSTREAM_2_5_INTEGRATION.md).
+
+## Исходная линия 2.1
+
+Версия Android в исходной линии: **2.1.17**, package ID `io.github.danusha2345.csqtt`.
 APK устанавливается рядом с оригиналом `amurcanov/csqtt` и прежними версиями
 нашего приложения (`csqtt.quic.amurcanov`). Это отдельная установка: старые
 данные сохраняются, но настройки и разрешение VPN нужно задать заново.

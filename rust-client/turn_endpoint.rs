@@ -22,7 +22,7 @@ impl TurnTransportMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Udp => "UDP",
-            Self::TcpTls => "TCP",
+            Self::TcpTls => "TCP/TLS",
         }
     }
 }
@@ -216,7 +216,7 @@ mod tests {
             TurnTransportMode::parse("tcp_tls").unwrap(),
             TurnTransportMode::TcpTls
         );
-        assert_eq!(TurnTransportMode::TcpTls.as_str(), "TCP");
+        assert_eq!(TurnTransportMode::TcpTls.as_str(), "TCP/TLS");
     }
 
     #[test]

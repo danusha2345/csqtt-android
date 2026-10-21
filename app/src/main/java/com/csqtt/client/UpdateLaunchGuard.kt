@@ -8,7 +8,6 @@ import android.content.pm.PackageInfo
 import android.os.Build
 import android.util.Log
 
-/** Drops only stale Activity/Compose state on the first launch after package replace. */
 internal object UpdateLaunchGuard {
     private const val TAG = "CSQTT"
     private const val PREFS = "update_launch_guard"

@@ -593,6 +593,7 @@ internal suspend fun performDeploy(
     keyPassphrase: String = "",
     certificate: String = "",
     installInDocker: Boolean = false,
+    secretPath: String = "",
 ): Boolean = withContext(Dispatchers.IO) {
     var ssh: SshjClient? = null
     var tempDir: File? = null
@@ -646,6 +647,7 @@ internal suspend fun performDeploy(
         val environmentFile = File(workingDir, "csqtt.env").apply {
             writeText(
                 buildString {
+                    if (secretPath.isNotBlank()) appendLine("CSQTT_WEB_SECRET_PATH=${deployEnvironmentValue(secretPath, installInDocker)}")
                     appendLine("CSQTT_WEB_USER=${deployEnvironmentValue(webLogin, installInDocker)}")
                     appendLine("CSQTT_WEB_PASS=${deployEnvironmentValue(webPass, installInDocker)}")
                 }

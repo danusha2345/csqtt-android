@@ -9,23 +9,11 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.BroadcastReceiver
-import android.net.VpnService
-import android.os.Build
-import android.util.Log
 import android.widget.RemoteViews
-import android.widget.Toast
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 
 class VpnWidgetProvider : AppWidgetProvider() {
-    companion object {
-        const val ACTION_WIDGET_TOGGLE = CsqttConstants.Widget.ACTION_TOGGLE
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    companion object {
         fun updateAllWidgets(context: Context) {
             runCatching {
                 val appWidgetManager = AppWidgetManager.getInstance(context)
@@ -38,84 +26,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     }
                     context.sendBroadcast(intent)
                 }
-            }
-        }
-
-        internal fun handleToggle(context: Context) {
-            runCatching {
-                if (TunnelManager.running.value) {
-                    val stopIntent = Intent(context, TunnelService::class.java).apply { action = "STOP" }
-                    context.startService(stopIntent)
-                    updateAllWidgets(context)
-                    return
-                }
-
-                scope.launch {
-                    try {
-                        val proxyMode = SettingsStore(context.applicationContext).proxyMode.first()
-                        if (requiresVpnPermission(proxyMode) && VpnService.prepare(context) != null) {
-                            context.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
-                            openMainActivity(context)
-                            return@launch
-                        }
-                        val startIntent = buildStartIntent(context)
-                        if (startIntent == null) {
-                            context.showRaisedToast("Заполните настройки подключения в CSQTT", Toast.LENGTH_LONG)
-                            openMainActivity(context)
-                            return@launch
-                        }
-
-                        context.startForegroundService(startIntent)
-                    } catch (e: Exception) {
-                        Log.e("VpnWidget", "Failed to start tunnel from widget", e)
-                        context.showRaisedToast("Ошибка запуска: ${e.localizedMessage}", Toast.LENGTH_SHORT)
-                    }
-                }
-            }.onFailure { e ->
-                Log.e("VpnWidget", "Error handling widget click", e)
-            }
-        }
-
-        private suspend fun buildStartIntent(context: Context): Intent? {
-            val store = SettingsStore(context.applicationContext)
-            val source = resolveConnectionSource(store) ?: return null
-
-            return Intent(context, TunnelService::class.java).apply {
-                action = "START"
-                putExtra("peer", source.peer)
-                putExtra("vk_hashes", source.hashes)
-                putExtra("vk_hashes_from_link", source.hashesFromLink)
-                putExtra("config_web_port", source.webPort)
-                putExtra("secondary_vk_hash", store.secondaryVkHash.first())
-                putExtra("workers_per_hash", store.workersPerHash.first())
-                putExtra("port", 0)
-                putExtra("sni", store.sni.first())
-                putExtra("connection_password", source.password)
-                putExtra("protocol", store.protocol.first())
-                putExtra("vk_auth_mode", store.vkAuthMode.first())
-                putExtra("captcha_mode", store.captchaMode.first())
-                putExtra("captcha_solve_method", store.captchaSolveMethod.first())
-                putExtra("fingerprint", store.selectedFingerprint.first())
-                putExtra("client_ids", store.activeClientIds.first())
-                putExtra("obfs_mode", store.obfsMode.first())
-                putExtra("turn_transport", store.turnTransport.first())
-            }
-        }
-
-        private fun openMainActivity(context: Context) {
-            val intent = Intent(context, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            runCatching {
-                val pendingIntent = PendingIntent.getActivity(
-                    context,
-                    200,
-                    intent,
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                )
-                pendingIntent.send()
-            }.onFailure {
-                context.startActivity(intent)
             }
         }
     }
@@ -137,11 +47,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
         if (running) {
             views.setTextViewText(R.id.widget_status, "Подключено")
-            views.setTextColor(R.id.widget_status, 0xFF00E5FF.toInt()) 
+            views.setTextColor(R.id.widget_status, 0xFF00E5FF.toInt())
             views.setInt(R.id.widget_toggle_btn, "setBackgroundResource", R.drawable.bg_widget_button_active)
         } else {
             views.setTextViewText(R.id.widget_status, "Отключено")
-            views.setTextColor(R.id.widget_status, 0xFF888888.toInt()) 
+            views.setTextColor(R.id.widget_status, 0xFF888888.toInt())
             views.setInt(R.id.widget_toggle_btn, "setBackgroundResource", R.drawable.bg_widget_button_inactive)
         }
 
@@ -156,10 +66,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
         )
         views.setOnClickPendingIntent(R.id.widget_container, openPendingIntent)
 
-        val toggleIntent = Intent(context, VpnWidgetProvider::class.java).apply {
-            action = ACTION_WIDGET_TOGGLE
+        val toggleIntent = Intent(context, VpnWidgetToggleReceiver::class.java).apply {
+            action = VpnWidgetToggleReceiver.ACTION
         }
-        toggleIntent.setClass(context, VpnWidgetToggleReceiver::class.java)
         val togglePendingIntent = PendingIntent.getBroadcast(
             context,
             appWidgetId + 1000,
@@ -169,14 +78,5 @@ class VpnWidgetProvider : AppWidgetProvider() {
         views.setOnClickPendingIntent(R.id.widget_toggle_btn, togglePendingIntent)
 
         appWidgetManager.updateAppWidget(appWidgetId, views)
-    }
-
-}
-
-class VpnWidgetToggleReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == VpnWidgetProvider.ACTION_WIDGET_TOGGLE) {
-            VpnWidgetProvider.handleToggle(context)
-        }
     }
 }

@@ -173,6 +173,8 @@ class ManlCaptchaActivity : ComponentActivity() {
                                                 loadWithOverviewMode = true
                                                 useWideViewPort = true
                                                 blockNetworkLoads = false
+                                                allowFileAccess = false
+                                                allowContentAccess = false
                                                 cacheMode = WebSettings.LOAD_DEFAULT
                                             }
 

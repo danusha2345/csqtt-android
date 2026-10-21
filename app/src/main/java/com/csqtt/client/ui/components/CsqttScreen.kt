@@ -24,11 +24,14 @@ import androidx.compose.ui.semantics.semantics
 import com.csqtt.client.ui.design.CsqttSizes
 import com.csqtt.client.ui.design.CsqttSpacing
 
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.csqtt.client.BuildConfig
+import androidx.compose.ui.unit.sp
 import com.csqtt.client.R
 
 internal val LocalCsqttHeaderActions = staticCompositionLocalOf<(@Composable RowScope.() -> Unit)?> { null }
@@ -63,24 +66,25 @@ fun CsqttScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_csqtt_logo),
-                    contentDescription = "CSQTT",
-                    tint = Color.Unspecified,
-                    modifier = Modifier.height(26.dp)
-                )
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                    horizontalAlignment = Alignment.Start
                 ) {
-					Text(
-						text = "v${BuildConfig.VERSION_NAME.removePrefix("v")}",
-						style = MaterialTheme.typography.labelLarge,
-						color = MaterialTheme.colorScheme.primary,
-					)
-                    headerActions?.let { Row(content = it) }
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_csqtt_logo),
+                        contentDescription = "CSQTT",
+                        tint = Color.Unspecified,
+                        modifier = Modifier.height(22.dp)
+                    )
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_v250_by_amurcanov),
+                        contentDescription = "v2.5.0 by amurcanov",
+                        tint = Color.Unspecified,
+                        modifier = Modifier.height(13.dp)
+                    )
                 }
+
+                headerActions?.let { Row(content = it) }
             }
             if (!title.isNullOrBlank() || actions != null) {
                 Row(

@@ -19,6 +19,8 @@ append_option() {
 start_service() {
 	local enabled mode peer password vk_hashes device_id workers obfs
 	local turn_transport turn_host turn_port tun_device socks5_listen
+	local domain_whitelist ip_whitelist exclude_ru_zones template_domains
+	local srtp_mode custom_turn_ips socks5_user socks5_password domain_routing direct_domains direct_ips ip_routing
 
 	config_load csqtt
 	config_get_bool enabled main enabled 0
@@ -29,7 +31,19 @@ start_service() {
 	config_get vk_hashes main vk_hashes
 	config_get device_id main device_id openwrt-router
 	config_get workers main workers 18
-	config_get obfs main obfs audio
+	config_get obfs main obfs unified
+	config_get srtp_mode main srtp_mode auto
+	config_get custom_turn_ips main custom_turn_ips
+	config_get socks5_user main socks5_user
+	config_get socks5_password main socks5_password
+	config_get_bool domain_routing main domain_routing 0
+	config_get_bool domain_whitelist main domain_whitelist 0
+	config_get_bool exclude_ru_zones main exclude_ru_zones 0
+	config_get_bool template_domains main template_domains 0
+	config_get direct_domains main direct_domains
+	config_get_bool ip_routing main ip_routing 0
+	config_get_bool ip_whitelist main ip_whitelist 0
+	config_get direct_ips main direct_ips
 	config_get turn_transport main turn_transport udp
 	config_get turn_host main turn_host
 	config_get turn_port main turn_port
@@ -52,6 +66,7 @@ start_service() {
 	json_init
 	json_add_string password "$password"
 	json_add_string vk "$vk_hashes"
+	json_add_string socks5_password "$socks5_password"
 	json_dump >"$CREDENTIALS_FILE" || return 1
 
 	procd_open_instance
@@ -62,6 +77,21 @@ start_service() {
 	append_option workers "$workers"
 	append_option obfs "$obfs"
 	append_option turn-transport "$turn_transport"
+	append_option srtp-mode "$srtp_mode"
+	append_option custom-turn-ips "$custom_turn_ips"
+	append_option socks5-user "$socks5_user"
+	if [ "$domain_routing" -eq 1 ]; then
+		procd_append_param command --domain-routing
+		append_option direct-domains "$direct_domains"
+		[ "$domain_whitelist" -eq 0 ] || procd_append_param command --domain-whitelist
+		[ "$exclude_ru_zones" -eq 0 ] || procd_append_param command --exclude-ru-zones
+		[ "$template_domains" -eq 0 ] || procd_append_param command --template-domains
+	fi
+	if [ "$ip_routing" -eq 1 ]; then
+		procd_append_param command --ip-routing
+		append_option direct-ips "$direct_ips"
+		[ "$ip_whitelist" -eq 0 ] || procd_append_param command --ip-whitelist
+	fi
 	append_option turn "$turn_host"
 	append_option port "$turn_port"
 	if [ "$mode" = tun ]; then

@@ -16,7 +16,7 @@ use tokio::{
 
 pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
-const MAX_DATA: usize = 2_000;
+const MAX_DATA: usize = 1_100;
 use crate::proxy_sequence::StreamSequence;
 const MAX_GLOBAL_STREAMS: usize = 256;
 const MAX_SESSION_STREAMS: usize = 32;

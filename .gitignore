@@ -14,3 +14,7 @@ local.properties
 release.keystore
 *.jks
 *.keystore
+
+# Python helpers
+__pycache__/
+*.pyc

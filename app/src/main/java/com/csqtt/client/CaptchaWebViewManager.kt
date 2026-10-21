@@ -195,6 +195,8 @@ object CaptchaWebViewManager {
                         loadWithOverviewMode = true
                         useWideViewPort = true
                         blockNetworkLoads = false
+                        allowFileAccess = false
+                        allowContentAccess = false
                         cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
                     }
 
