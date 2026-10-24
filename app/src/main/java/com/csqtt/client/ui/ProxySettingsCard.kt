@@ -13,15 +13,24 @@ import kotlinx.coroutines.launch
 
 @Composable
 internal fun ProxySettingsCard(store: SettingsStore) {
-    val mode by store.proxyMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Proxy.MODE_VPN)
-    val port by store.proxyPort.collectAsStateWithLifecycle(initialValue = 1080)
-    val lan by store.proxyLanEnabled.collectAsStateWithLifecycle(initialValue = false)
-    val username by store.proxyUsername.collectAsStateWithLifecycle(initialValue = "")
-    val password by store.proxyPassword.collectAsStateWithLifecycle(initialValue = "")
-    var portText by remember(port) { mutableStateOf(port.toString()) }
+    val settings by store.proxySettings.collectAsStateWithLifecycle(initialValue = null)
+    settings?.let { initial ->
+        key(initial.profile) { ProxySettingsEditor(store, initial) }
+    }
+}
+
+@Composable
+private fun ProxySettingsEditor(store: SettingsStore, initial: com.csqtt.client.ProxySettingsSnapshot) {
+    var mode by remember { mutableStateOf(initial.mode) }
+    var port by remember { mutableIntStateOf(initial.port) }
+    var lan by remember { mutableStateOf(initial.lan) }
+    var username by remember { mutableStateOf(initial.username) }
+    var password by remember { mutableStateOf(initial.password) }
+    var portText by remember { mutableStateOf(initial.port.toString()) }
     val scope = rememberCoroutineScope()
     fun save(nextMode: String = mode, nextPort: Int = port, nextLan: Boolean = lan, nextUser: String = username, nextPassword: String = password) {
-        scope.launch { store.saveProxySettings(nextMode, nextPort, nextLan, nextUser, nextPassword) }
+        mode = nextMode; port = nextPort; lan = nextLan; username = nextUser; password = nextPassword
+        scope.launch { store.saveProxySettings(nextMode, nextPort, nextLan, nextUser, nextPassword, initial.profile) }
     }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

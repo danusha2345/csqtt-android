@@ -4872,7 +4872,7 @@ async fn handle_getconf(
                         session.id,
                     );
                     let ip_str = match &access {
-                        CredentialAccess::Main => crate::model::OWNER_TUNNEL_IP.to_string(),
+                        CredentialAccess::Main => crate::net_setup::tunnel_address(2),
                         CredentialAccess::Slot(slot_key) => {
                             let needs_ip =
                                 db.passwords.get(slot_key).is_some_and(|e| e.ip.is_empty());

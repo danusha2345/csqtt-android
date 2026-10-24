@@ -26,6 +26,28 @@ import org.json.JSONObject
 
 private fun <T> Flow<T>.onIo(): Flow<T> = flowOn(Dispatchers.IO)
 
+internal data class ProxySettingsSnapshot(
+    val profile: Int,
+    val mode: String,
+    val port: Int,
+    val lan: Boolean,
+    val username: String,
+    val password: String,
+)
+
+internal data class LocalRoutingSettings(
+    val enabled: Boolean,
+    val isWhitelist: Boolean,
+    val excludeRuZones: Boolean,
+    val templateDomains: Boolean,
+    val directDomains: String,
+    val ipRoutingEnabled: Boolean,
+    val ipIsWhitelist: Boolean,
+    val directIps: String,
+) {
+    val osExcludedIps: String get() = if (ipRoutingEnabled && !ipIsWhitelist) directIps else ""
+}
+
 internal data class DeploySettingsSnapshot(
     val profile: Int = -1,
     val ip: String = "",
@@ -337,11 +359,40 @@ class SettingsStore private constructor(
     val proxyPassword: Flow<String> = dataStore.data.map { prefs ->
         readSecret(prefs, PROXY_PASSWORD_ENCRYPTED, PROXY_PASSWORD, prefs[ACTIVE_PROFILE] ?: 0)
     }.onIo()
-    suspend fun saveProxySettings(mode: String, port: Int, lan: Boolean, username: String, password: String) {
+    internal val proxySettings: Flow<ProxySettingsSnapshot> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        ProxySettingsSnapshot(
+            profile,
+            prefs[getProfileKey(PROXY_MODE, profile)] ?: CsqttConstants.Proxy.MODE_VPN,
+            prefs[getProfileKey(PROXY_PORT, profile)] ?: 1080,
+            prefs[getProfileKey(PROXY_LAN_ENABLED, profile)] ?: false,
+            prefs[getProfileKey(PROXY_USERNAME, profile)] ?: "",
+            readSecret(prefs, PROXY_PASSWORD_ENCRYPTED, PROXY_PASSWORD, profile),
+        )
+    }.onIo()
+
+    internal val localRoutingSettings: Flow<LocalRoutingSettings> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val white = prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] ?: false
+        val domains = if (white) prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] ?: ""
+            else prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] ?: prefs[getProfileKey(DIRECT_DOMAINS, profile)] ?: ""
+        val ru = !white && (prefs[getProfileKey(EXCLUDE_RU_ZONES_ENABLED, profile)] ?: false)
+        val template = !white && (prefs[getProfileKey(TEMPLATE_DOMAINS_ENABLED, profile)] ?: false)
+        val ipWhite = prefs[getProfileKey(IP_IS_WHITELIST, profile)] ?: false
+        val ips = prefs[getProfileKey(if (ipWhite) DIRECT_IPS_WHITE else DIRECT_IPS_BLACK, profile)] ?: ""
+        LocalRoutingSettings(
+            enabled = (prefs[getProfileKey(DOMAIN_ROUTING_ENABLED, profile)] ?: false) && (domains.isNotBlank() || ru || template),
+            isWhitelist = white, excludeRuZones = ru, templateDomains = template, directDomains = domains,
+            ipRoutingEnabled = (prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] ?: false) && ips.isNotBlank(),
+            ipIsWhitelist = ipWhite, directIps = ips,
+        )
+    }
+
+    suspend fun saveProxySettings(mode: String, port: Int, lan: Boolean, username: String, password: String, targetProfile: Int? = null) {
         require(mode == CsqttConstants.Proxy.MODE_VPN || mode == CsqttConstants.Proxy.MODE_SOCKS5)
         require(port in 1..65535 && username.toByteArray().size <= 255 && password.toByteArray().size <= 255)
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = targetProfile ?: prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(PROXY_MODE, profile)] = mode
             prefs[getProfileKey(PROXY_PORT, profile)] = port
             prefs[getProfileKey(PROXY_LAN_ENABLED, profile)] = lan
@@ -1505,6 +1556,11 @@ class SettingsStore private constructor(
             tunnel.put("custom_turn_ips", prefs[getProfileKey(CUSTOM_TURN_IPS, profile)] ?: "")
             tunnel.put("sni", prefs[getProfileKey(SNI, profile)] ?: "")
             tunnel.put("no_dns", prefs[getProfileKey(NO_DNS, profile)] ?: false)
+            tunnel.put("proxy_mode", prefs[getProfileKey(PROXY_MODE, profile)] ?: CsqttConstants.Proxy.MODE_VPN)
+            tunnel.put("proxy_port", prefs[getProfileKey(PROXY_PORT, profile)] ?: 1080)
+            tunnel.put("proxy_lan_enabled", prefs[getProfileKey(PROXY_LAN_ENABLED, profile)] ?: false)
+            tunnel.put("proxy_username", prefs[getProfileKey(PROXY_USERNAME, profile)] ?: "")
+            if (includeSecrets) tunnel.put("proxy_password", readSecret(prefs, PROXY_PASSWORD_ENCRYPTED, PROXY_PASSWORD, profile))
             root.put("tunnel", tunnel)
         }
 
@@ -1512,9 +1568,9 @@ class SettingsStore private constructor(
             val deploy = JSONObject()
             deploy.put("deploy_ip", prefs[getProfileKey(DEPLOY_IP, profile)] ?: "")
             deploy.put("deploy_login", prefs[getProfileKey(DEPLOY_LOGIN, profile)] ?: "")
-            deploy.put("deploy_ssh_port", prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] ?: "")
+            deploy.put("deploy_ssh_port", prefs[getProfileKey(DEPLOY_SSH_PORT, profile)]?.ifBlank { "22" } ?: "22")
             deploy.put("server_web_port", prefs[getProfileKey(SERVER_WEB_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT)
-            deploy.put("docker_install", prefs[getProfileKey(DOCKER_INSTALL, profile)] ?: true)
+            deploy.put("docker_install", prefs[getProfileKey(DOCKER_INSTALL, profile)] ?: false)
             deploy.put("ssh_keys_mode", prefs[getProfileKey(SSH_KEYS_MODE, profile)] ?: false)
             deploy.put("vk_hashes", prefs[getProfileKey(VK_HASHES, profile)] ?: "")
             deploy.put("secondary_vk_hash", prefs[getProfileKey(SECONDARY_VK_HASH, profile)] ?: "")
@@ -1581,18 +1637,28 @@ class SettingsStore private constructor(
                 for (key in listOf("server_peer_port", "listen_port")) {
                     if (tunnel.has(key)) require(tunnel.getInt(key) in (if (key == "listen_port") 0 else 1)..65535)
                 }
+                if (tunnel.has("proxy_mode")) require(tunnel.getString("proxy_mode") in listOf("vpn", "socks5"))
+                if (tunnel.has("proxy_port")) require(tunnel.getInt("proxy_port") in 1..65535)
+                for (key in listOf("proxy_username", "proxy_password")) {
+                    if (tunnel.has(key)) require(tunnel.getString(key).toByteArray().size <= 255)
+                }
                 if (tunnel.has("srtp_mode")) require(tunnel.getString("srtp_mode") in listOf("auto", "wrap", "dtls"))
             }
             if (includeDeploy && root.has("deploy")) {
                 val deploy = root.getJSONObject("deploy")
                 if (deploy.has("server_web_port")) require(deploy.getInt("server_web_port") in 1..65535)
-                if (deploy.has("deploy_ssh_port")) require(deploy.getString("deploy_ssh_port").toIntOrNull() in 1..65535)
+                if (deploy.has("deploy_ssh_port")) require(deploy.getString("deploy_ssh_port").ifBlank { "22" }.toIntOrNull() in 1..65535)
             }
             require(root.optInt("version", 1) in 1..2) { "Неподдерживаемая версия конфигурации" }
             dataStore.edit { mutable ->
                 val profile = mutable[ACTIVE_PROFILE] ?: 0
                 if (includeTunnel && root.has("tunnel")) {
                     val tunnel = root.getJSONObject("tunnel")
+                    if (tunnel.has("proxy_mode")) mutable[getProfileKey(PROXY_MODE, profile)] = tunnel.getString("proxy_mode")
+                    if (tunnel.has("proxy_port")) mutable[getProfileKey(PROXY_PORT, profile)] = tunnel.getInt("proxy_port")
+                    if (tunnel.has("proxy_lan_enabled")) mutable[getProfileKey(PROXY_LAN_ENABLED, profile)] = tunnel.getBoolean("proxy_lan_enabled")
+                    if (tunnel.has("proxy_username")) mutable[getProfileKey(PROXY_USERNAME, profile)] = tunnel.getString("proxy_username")
+                    if (tunnel.has("proxy_password")) mutable.putSecret(PROXY_PASSWORD_ENCRYPTED, PROXY_PASSWORD, tunnel.getString("proxy_password"), profile)
                     if (tunnel.has("peer")) mutable[getProfileKey(PEER, profile)] = tunnel.getString("peer")
                     if (tunnel.has("listen_port")) mutable[getProfileKey(LISTEN_PORT, profile)] = tunnel.getInt("listen_port")
                     if (tunnel.has("manual_ports_enabled")) mutable[getProfileKey(MANUAL_PORTS_ENABLED, profile)] = tunnel.getBoolean("manual_ports_enabled")
@@ -1612,7 +1678,7 @@ class SettingsStore private constructor(
                     val deploy = root.getJSONObject("deploy")
                     if (deploy.has("deploy_ip")) mutable[getProfileKey(DEPLOY_IP, profile)] = deploy.getString("deploy_ip")
                     if (deploy.has("deploy_login")) mutable[getProfileKey(DEPLOY_LOGIN, profile)] = deploy.getString("deploy_login")
-                    if (deploy.has("deploy_ssh_port")) mutable[getProfileKey(DEPLOY_SSH_PORT, profile)] = deploy.getString("deploy_ssh_port")
+                    if (deploy.has("deploy_ssh_port")) mutable[getProfileKey(DEPLOY_SSH_PORT, profile)] = deploy.getString("deploy_ssh_port").ifBlank { "22" }
                     if (deploy.has("server_web_port")) mutable[getProfileKey(SERVER_WEB_PORT, profile)] = deploy.getInt("server_web_port")
                     if (deploy.has("docker_install")) mutable[getProfileKey(DOCKER_INSTALL, profile)] = deploy.getBoolean("docker_install")
                     if (deploy.has("ssh_keys_mode")) mutable[getProfileKey(SSH_KEYS_MODE, profile)] = deploy.getBoolean("ssh_keys_mode")

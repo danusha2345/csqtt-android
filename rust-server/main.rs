@@ -1034,6 +1034,7 @@ async fn async_main() -> Result<()> {
             .await?;
     }
 
+    std::sync::LazyLock::force(&net_setup::NETWORK);
     let _instance_lock = acquire_instance_lock(&args.config_dir)?;
     match tokio::time::timeout(
         Duration::from_secs(1),
@@ -1097,6 +1098,14 @@ async fn async_main() -> Result<()> {
         db.set_auto_restart_interval_hours(DEFAULT_AUTO_RESTART_INTERVAL_HOURS);
     }
 
+    anyhow::ensure!(
+        model::valid_tunnel_password(&db.main_password),
+        "invalid master password: pipes, whitespace edges and control characters are not allowed"
+    );
+    anyhow::ensure!(
+        db.passwords.keys().all(|p| model::valid_tunnel_password(p)),
+        "invalid client password in database"
+    );
     let web_pass = if args.web_pass.is_empty() {
         let value = random_password() + &random_password();
         println!("[INIT] generated web password: {value}");

@@ -75,6 +75,7 @@ start_service() {
 	append_option credentials-file "$CREDENTIALS_FILE"
 	append_option device-id "$device_id"
 	append_option workers "$workers"
+	procd_append_param command --exact-workers
 	append_option obfs "$obfs"
 	append_option turn-transport "$turn_transport"
 	append_option srtp-mode "$srtp_mode"

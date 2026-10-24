@@ -452,11 +452,9 @@ impl DirectRelay {
             .preresolve_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
+        self.direct_ips
+            .store(Arc::new(std::collections::HashSet::new()));
         if !config.enabled {
-            if !config.ip_routing_enabled {
-                self.direct_ips
-                    .store(Arc::new(std::collections::HashSet::new()));
-            }
             self.dns_domain_map.clear();
             if let Ok(mut guard) = self.active_tcp.write() {
                 guard.clear();
@@ -512,10 +510,6 @@ impl DirectRelay {
                 .await;
             });
         }
-    }
-
-    pub fn is_direct_ip(&self, ip: &IpAddr) -> bool {
-        self.direct_ips.load().contains(ip)
     }
 
     fn forward_direct_packet(&self, slice: &[u8]) {
@@ -677,15 +671,9 @@ impl DirectRelay {
             &config.ip_rules,
         );
 
-        let is_candidate_direct = if self.is_direct_ip(&dst_ip) {
-            if config.ip_routing_enabled && config.ip_is_whitelist && !config.ip_rules.is_empty() {
-                !config.ip_rules.iter().any(|r| r.matches(&dst_ip))
-            } else {
-                true
-            }
-        } else {
-            matches!(verdict, crate::sni::RouteVerdict::Direct)
-        };
+        // DNS caches identify a domain, never grant a permanent bypass. Re-evaluate
+        // new flows against the current rules, including IP whitelist precedence.
+        let is_candidate_direct = matches!(verdict, crate::sni::RouteVerdict::Direct);
 
         if protocol == 17 {
             if !is_candidate_direct {
@@ -1321,6 +1309,9 @@ mod tests {
         )
         .expect("smoltcp test stack must initialize");
 
+        relay
+            .dns_domain_map
+            .insert("93.184.216.34".parse().unwrap(), "example.com".into());
         let src: SocketAddr = "10.66.67.2:54321".parse().unwrap();
         let dst: SocketAddr = "93.184.216.34:80".parse().unwrap();
         relay
@@ -1506,5 +1497,54 @@ mod tests {
 
         let loaded = direct_ips.load();
         assert!(loaded.contains(&dynamic_ip));
+    }
+}
+
+#[cfg(test)]
+mod branch_review_probes {
+    use super::*;
+    #[tokio::test]
+    async fn removed_domain_must_not_keep_bypassing_new_connections() {
+        let old_ip: std::net::IpAddr = "198.18.0.42".parse().unwrap();
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::dispatcher::DomainRoutingConfig {
+                enabled: true,
+                exclude_ru_zones: true,
+                direct_domains: Arc::new(vec!["removed.example".to_string()]),
+                ..Default::default()
+            },
+        ));
+        let ips = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashSet::from([old_ip]),
+        ));
+        let domains = Arc::new(crate::sni::DnsDomainMap::default());
+        domains.insert(old_ip, "removed.example".to_string());
+        let pool = crate::packet::PacketPool::new(32);
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let relay = DirectRelay::new(config.clone(), ips, domains, pool.clone(), tx).unwrap();
+        let new_config = crate::dispatcher::DomainRoutingConfig {
+            enabled: true,
+            exclude_ru_zones: true,
+            ..Default::default()
+        };
+        config.store(Arc::new(new_config.clone()));
+        relay.sync_domain_routing(&new_config);
+        tokio::task::yield_now().await;
+        let wire = build_tcp_packet(
+            "10.66.67.2:51000".parse().unwrap(),
+            "198.18.0.42:443".parse().unwrap(),
+            1,
+            0,
+            0x02,
+            &[],
+        )
+        .unwrap();
+        let mut packet = pool.acquire();
+        packet.read_area()[..wire.len()].copy_from_slice(&wire);
+        packet.set_read_len(wire.len()).unwrap();
+        assert!(
+            !relay.try_handle(&packet).await,
+            "removed exception still bypasses VPN on a NEW TCP SYN"
+        );
     }
 }

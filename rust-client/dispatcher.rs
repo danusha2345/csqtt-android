@@ -489,6 +489,7 @@ pub struct WorkerEntry {
 }
 
 pub struct Dispatcher {
+    pub(crate) stats: Arc<Stats>,
     workers: ArcSwap<Vec<WorkerEntry>>,
     proxy_frames: OnceLock<mpsc::Sender<Vec<u8>>>,
     proxy_routes: Mutex<HashMap<u64, (usize, u64)>>,
@@ -540,6 +541,7 @@ impl Dispatcher {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: stats.clone(),
         });
         let io_dispatcher = dispatcher.clone();
         let task = spawn_critical(
@@ -619,6 +621,7 @@ impl Dispatcher {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: stats.clone(),
         });
         crate::log_error!(
             "[КЛИЕНТ] Профиль очередей для {worker_count} потоков: буфер I/O: {} pkts, квант: {} байт",
@@ -2025,6 +2028,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: Arc::new(Stats::default()),
         };
 
         let mut p1 = pool.acquire();
@@ -2204,6 +2208,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: Arc::new(Stats::default()),
         };
 
         for i in 0..inbound_capacity {
@@ -2262,6 +2267,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: Arc::new(Stats::default()),
         };
 
         let p_empty = pool.acquire();
@@ -2315,6 +2321,7 @@ mod tests {
 
         let dst_ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
         direct_ips.store(Arc::new(std::iter::once(dst_ip).collect()));
+        dns_domain_map.insert(dst_ip, "example.com".into());
 
         let dispatcher = Dispatcher {
             workers: ArcSwap::from_pointee(Vec::new()),
@@ -2335,6 +2342,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            stats: Arc::new(Stats::default()),
         };
 
         let src: SocketAddr = "10.66.67.2:54321".parse().unwrap();

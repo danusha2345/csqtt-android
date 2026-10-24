@@ -1203,7 +1203,7 @@ impl FirewallRule {
 }
 
 fn purge_legacy_mss_clamp() {
-    let subnet = crate::tun_device::TUN_SUBNET;
+    let subnet = crate::net_setup::tunnel_subnet();
     let mss_source = [
         "-s",
         subnet,
@@ -1250,7 +1250,7 @@ fn purge_legacy_mss_clamp() {
 }
 
 fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
-    let subnet = crate::tun_device::TUN_SUBNET;
+    let subnet = crate::net_setup::tunnel_subnet();
     vec![
         FirewallRule::new(
             "iptables",

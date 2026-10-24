@@ -1948,7 +1948,8 @@ object TunnelManager {
         return try {
             val json = org.json.JSONObject(routingJsonStr)
             val mode = json.optString("mode", "blacklist")
-            val isWhite = json.optBoolean("domains_is_whitelist", mode == "whitelist")
+            val isWhite = json.optBoolean("is_whitelist", mode == "whitelist")
+            val domainsWhite = json.optBoolean("domains_is_whitelist", json.optString("domains_mode", "blacklist") == "whitelist")
             val packagesJson = json.optJSONArray("packages")
             val packagesList = mutableListOf<String>()
             if (packagesJson != null) {
@@ -1978,6 +1979,7 @@ object TunnelManager {
             }
             ServerRoutingRule(
                 isWhite = isWhite,
+                domainsIsWhite = domainsWhite,
                 packages = packagesList,
                 domains = domainsList,
                 templateDomains = templateDomains,
@@ -2002,14 +2004,16 @@ object TunnelManager {
                     excludeRuZones = false,
                     templateDomains = newServerRule.templateDomains,
                     directDomains = newServerRule.domains.joinToString(","),
-                    isWhitelist = newServerRule.isWhite,
+                    isWhitelist = newServerRule.domainsIsWhite,
                     ipRoutingEnabled = newServerRule.ips.isNotEmpty(),
                     ipIsWhitelist = newServerRule.ipIsWhite,
                     directIps = newServerRule.ips.joinToString(","),
                 )
                 val vpnInputsChanged = previousRule == null ||
                     previousRule.isWhite != newServerRule.isWhite ||
-                    previousRule.packages.toSet() != newServerRule.packages.toSet()
+                    previousRule.packages.toSet() != newServerRule.packages.toSet() ||
+                    previousRule.ipIsWhite != newServerRule.ipIsWhite ||
+                    previousRule.ips.toSet() != newServerRule.ips.toSet()
                 if (vpnReady.value && vpnInputsChanged) {
                     val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
                         action = "RELOAD_ROUTING"
@@ -2021,29 +2025,7 @@ object TunnelManager {
                 }
             } else if (previousRule != null) {
                 activeScope.launch {
-                    val settingsStore = SettingsStore(ctx)
-                    val domainWhite = settingsStore.domainIsWhitelist.first()
-                    val domainEnabled = settingsStore.domainRoutingEnabled.first()
-                    val excludeRu = settingsStore.excludeRuZonesEnabled.first()
-                    val templateEnabled = settingsStore.templateDomainsEnabled.first()
-                    val domains = if (domainWhite) settingsStore.directDomainsWhite.first() else settingsStore.directDomainsBlack.first()
-                    val ipWhite = settingsStore.ipIsWhitelist.first()
-                    val ipEnabled = settingsStore.ipRoutingEnabled.first()
-                    val ips = if (ipWhite) settingsStore.directIpsWhite.first() else settingsStore.directIpsBlack.first()
-                    val hasDomains = if (domainWhite) domains.isNotBlank() else (domains.isNotBlank() || templateEnabled || excludeRu)
-                    val effectiveDomainEnabled = domainEnabled && hasDomains
-                    val hasIps = ips.isNotBlank()
-                    val effectiveIpEnabled = ipEnabled && hasIps
-                    updateDomainRouting(
-                        enabled = effectiveDomainEnabled,
-                        excludeRuZones = if (domainWhite) false else excludeRu,
-                        templateDomains = if (domainWhite) false else templateEnabled,
-                        directDomains = domains,
-                        isWhitelist = domainWhite,
-                        ipRoutingEnabled = effectiveIpEnabled,
-                        ipIsWhitelist = ipWhite,
-                        directIps = ips,
-                    )
+                    applyLocalRouting(SettingsStore(ctx).localRoutingSettings.first())
                     if (vpnReady.value) {
                         val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
                             action = "RELOAD_ROUTING"
@@ -2073,32 +2055,20 @@ object TunnelManager {
         writeProcessCommand(identity, command, "domain_routing_err")
     }
 
+    internal fun applyLocalRouting(settings: LocalRoutingSettings) {
+        updateDomainRouting(
+            enabled = settings.enabled, isWhitelist = settings.isWhitelist,
+            excludeRuZones = settings.excludeRuZones, templateDomains = settings.templateDomains,
+            directDomains = settings.directDomains, ipRoutingEnabled = settings.ipRoutingEnabled,
+            ipIsWhitelist = settings.ipIsWhitelist, directIps = settings.directIps,
+        )
+    }
+
     fun pushLocalRouting(ctx: Context) {
         if (serverRoutingActive.value) return
         activeScope.launch {
-            val settingsStore = SettingsStore(ctx)
-            val domainWhite = settingsStore.domainIsWhitelist.first()
-            val domainEnabled = settingsStore.domainRoutingEnabled.first()
-            val excludeRu = settingsStore.excludeRuZonesEnabled.first()
-            val templateEnabled = settingsStore.templateDomainsEnabled.first()
-            val domains = if (domainWhite) settingsStore.directDomainsWhite.first() else settingsStore.directDomainsBlack.first()
-            val ipWhite = settingsStore.ipIsWhitelist.first()
-            val ipEnabled = settingsStore.ipRoutingEnabled.first()
-            val ips = if (ipWhite) settingsStore.directIpsWhite.first() else settingsStore.directIpsBlack.first()
-            val hasDomains = if (domainWhite) domains.isNotBlank() else (domains.isNotBlank() || templateEnabled || excludeRu)
-            val effectiveDomainEnabled = domainEnabled && hasDomains
-            val hasIps = ips.isNotBlank()
-            val effectiveIpEnabled = ipEnabled && hasIps
-            updateDomainRouting(
-                enabled = effectiveDomainEnabled,
-                excludeRuZones = if (domainWhite) false else excludeRu,
-                templateDomains = if (domainWhite) false else templateEnabled,
-                directDomains = domains,
-                isWhitelist = domainWhite,
-                ipRoutingEnabled = effectiveIpEnabled,
-                ipIsWhitelist = ipWhite,
-                directIps = ips,
-            )
+            val settings = SettingsStore(ctx).localRoutingSettings.first()
+            if (!serverRoutingActive.value) applyLocalRouting(settings)
         }
     }
 
@@ -2197,4 +2167,5 @@ data class ServerRoutingRule(
     val templateDomains: Boolean,
     val ipIsWhite: Boolean = false,
     val ips: List<String> = emptyList(),
+    val domainsIsWhite: Boolean = false,
 )

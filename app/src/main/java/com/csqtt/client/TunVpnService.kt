@@ -225,13 +225,9 @@ class TunVpnService : VpnService() {
                         ipWhite = serverRule.ipIsWhite
                         ipListStr = serverRule.ips.joinToString(",")
                     } else {
-                        val settingsStore = SettingsStore(applicationContext)
-                        ipWhite = settingsStore.ipIsWhitelist.first()
-                        ipListStr = if (ipWhite) {
-                            settingsStore.directIpsWhite.first()
-                        } else {
-                            settingsStore.directIpsBlack.first()
-                        }
+                        val settings = SettingsStore(applicationContext).localRoutingSettings.first()
+                        ipWhite = settings.ipIsWhitelist
+                        ipListStr = settings.osExcludedIps
                     }
 
                     if (!ipWhite && ipListStr.isNotBlank()) {

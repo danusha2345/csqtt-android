@@ -43,7 +43,8 @@ internal suspend fun toggleTunnelFromQuickAction(context: Context, running: Bool
         context.startService(Intent(context, TunnelService::class.java).apply { action = QuickTunnelAction.STOP })
         return
     }
-    if (VpnService.prepare(context) != null) {
+    if (requiresVpnPermission(SettingsStore(context.applicationContext).proxyMode.first()) &&
+        VpnService.prepare(context) != null) {
         context.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
         openMain()
         return

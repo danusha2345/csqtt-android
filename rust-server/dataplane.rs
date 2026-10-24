@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 use crate::{
-    net_setup::{TUN_ADDR, TUN_IFACE},
+    net_setup::{TUN_IFACE, tunnel_address},
     tokio_io::{
         IoCounters, MAX_RX_PER_PASS, PacketOutput, RxOutcome, TICK_INTERVAL_MS, TUN_RX_DRAIN_BATCH,
         TokioIo,
@@ -63,7 +63,7 @@ impl DataplaneConfig {
         Self {
             listen,
             tun_iface: TUN_IFACE.to_owned(),
-            tun_addr: TUN_ADDR.to_owned(),
+            tun_addr: tunnel_address(1),
             command_capacity: 4096,
         }
     }

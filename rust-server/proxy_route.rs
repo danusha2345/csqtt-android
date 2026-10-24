@@ -568,7 +568,7 @@ async fn tproxy_interception_present(port: u16) -> bool {
     let port_arg = port.to_string();
     let comment = tproxy_comment(port);
     let iface = crate::tun_device::TUN_IFACE;
-    let subnet = crate::tun_device::TUN_SUBNET;
+    let subnet = crate::net_setup::tunnel_subnet();
     for protocol in ["tcp", "udp"] {
         if !command_success(
             "iptables",
@@ -666,7 +666,7 @@ async fn add_tproxy_rules(port: u16) -> Result<()> {
                 "-i",
                 crate::tun_device::TUN_IFACE,
                 "-s",
-                crate::tun_device::TUN_SUBNET,
+                crate::net_setup::tunnel_subnet(),
                 "-p",
                 protocol,
                 "-m",
@@ -694,7 +694,7 @@ async fn add_tproxy_rules(port: u16) -> Result<()> {
             "-i",
             crate::tun_device::TUN_IFACE,
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tunnel_subnet(),
             "-m",
             "comment",
             "--comment",
@@ -787,7 +787,7 @@ async fn remove_from_subnet_rule() {
             "rule",
             "del",
             "from",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tunnel_subnet(),
             "priority",
             LEGACY_POLICY_PRIORITY,
             "table",
@@ -807,7 +807,7 @@ async fn drop_new_flow_mark_rules() {
             "-D",
             "PREROUTING",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tunnel_subnet(),
             "-m",
             "conntrack",
             "--ctstate",
@@ -836,7 +836,7 @@ async fn cleanup_mark_rules() {
             "-D",
             "PREROUTING",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tunnel_subnet(),
             "-m",
             "comment",
             "--comment",
@@ -875,7 +875,7 @@ async fn cleanup_nat_exemption(tun_name: &str) {
                 "-D",
                 "POSTROUTING",
                 "-s",
-                crate::tun_device::TUN_SUBNET,
+                crate::net_setup::tunnel_subnet(),
                 "-o",
                 tun_name,
                 "-m",
@@ -916,7 +916,7 @@ async fn cleanup_legacy_quic_rule() {
             "-D",
             "FORWARD",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tunnel_subnet(),
             "-p",
             "udp",
             "--dport",

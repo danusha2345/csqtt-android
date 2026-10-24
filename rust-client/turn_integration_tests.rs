@@ -1604,7 +1604,7 @@ async fn windows_client_reaches_wsl_server_through_a_real_turn_channel_and_dispa
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool: pool.clone(),
-            stats,
+            stats: stats.clone(),
             events: Events::new(false),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -1659,9 +1659,9 @@ async fn windows_client_reaches_wsl_server_through_a_real_turn_channel_and_dispa
         client_ip.octets()[1],
         client_ip.octets()[2],
         client_ip.octets()[3],
-        10,
-        66,
-        67,
+        client_ip.octets()[0],
+        client_ip.octets()[1],
+        client_ip.octets()[2],
         1,
     ];
     let mut sum = 0u32;
@@ -1694,7 +1694,11 @@ async fn windows_client_reaches_wsl_server_through_a_real_turn_channel_and_dispa
     assert_eq!(reply_pkt.as_slice()[20], 0);
     assert_large_icmp_roundtrip(&dispatcher, &pool, client_ip).await;
     if std::env::var_os("CSQTT_E2E_LOCAL_PROXY").is_some() {
+        let before_up = stats.total_bytes_up.load(Ordering::Relaxed);
+        let before_down = stats.total_bytes_down.load(Ordering::Relaxed);
         assert_native_socks_roundtrip(&dispatcher, &pool, cancel.clone()).await;
+        assert!(stats.total_bytes_up.load(Ordering::Relaxed) - before_up >= 4096);
+        assert!(stats.total_bytes_down.load(Ordering::Relaxed) - before_down >= 4096);
     }
 
     cancel.cancel();
@@ -1783,7 +1787,7 @@ async fn windows_client_reaches_wsl_server_over_dtls_srtp() {
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool: pool.clone(),
-            stats,
+            stats: stats.clone(),
             events: Events::new(false),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -1842,9 +1846,9 @@ async fn windows_client_reaches_wsl_server_over_dtls_srtp() {
         client_ip.octets()[1],
         client_ip.octets()[2],
         client_ip.octets()[3],
-        10,
-        66,
-        67,
+        client_ip.octets()[0],
+        client_ip.octets()[1],
+        client_ip.octets()[2],
         1,
     ];
     let mut sum = 0u32;
@@ -1877,7 +1881,11 @@ async fn windows_client_reaches_wsl_server_over_dtls_srtp() {
     assert_eq!(reply_pkt.as_slice()[20], 0, "DTLS 1.2");
     assert_large_icmp_roundtrip(&dispatcher, &pool, client_ip).await;
     if std::env::var_os("CSQTT_E2E_LOCAL_PROXY").is_some() {
+        let before_up = stats.total_bytes_up.load(Ordering::Relaxed);
+        let before_down = stats.total_bytes_down.load(Ordering::Relaxed);
         assert_native_socks_roundtrip(&dispatcher, &pool, cancel.clone()).await;
+        assert!(stats.total_bytes_up.load(Ordering::Relaxed) - before_up >= 4096);
+        assert!(stats.total_bytes_down.load(Ordering::Relaxed) - before_down >= 4096);
     }
 
     cancel.cancel();
@@ -2040,7 +2048,7 @@ async fn getconf_timeout_recovers_without_terminating_the_tunnel() {
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool,
-            stats,
+            stats: stats.clone(),
             events: Events::new(false),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -2154,7 +2162,7 @@ async fn running_client_receives_hot_dns_configuration_without_reconnect() {
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool,
-            stats,
+            stats: stats.clone(),
             events: Events::new(false),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -3055,7 +3063,7 @@ async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_need
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool,
-            stats,
+            stats: stats.clone(),
             events: Events::new(false),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -3263,9 +3271,9 @@ async fn streams_partial_death_keeps_tunnel_and_dataplane_alive() {
         client_ip.octets()[1],
         client_ip.octets()[2],
         client_ip.octets()[3],
-        10,
-        66,
-        67,
+        client_ip.octets()[0],
+        client_ip.octets()[1],
+        client_ip.octets()[2],
         1,
     ];
     let mut sum = 0u32;
@@ -4041,7 +4049,12 @@ async fn assert_large_icmp_roundtrip(
     wire[8] = 64;
     wire[9] = 1;
     wire[12..16].copy_from_slice(&source.octets());
-    wire[16..20].copy_from_slice(&[10, 66, 67, 1]);
+    wire[16..20].copy_from_slice(&[
+        source.octets()[0],
+        source.octets()[1],
+        source.octets()[2],
+        1,
+    ]);
     wire[20] = 8;
     wire[24..28].copy_from_slice(&[0x51, 0x77, 0, 2]);
     for (index, value) in wire[28..].iter_mut().enumerate() {

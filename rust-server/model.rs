@@ -315,10 +315,8 @@ impl Database {
             } else {
                 key.clone()
             };
-            if entry.ip.is_empty()
-                && let Some(next_ip) = get_next_ip(self)
-            {
-                entry.ip = next_ip;
+            if !available_client_ip(self, &entry.ip) {
+                entry.ip = get_next_ip(self).unwrap_or_default();
                 repairs.push(format!("password tag={tag} ip assigned"));
             }
             if entry.sub_uuid.trim().is_empty() {
@@ -722,17 +720,28 @@ pub fn is_expired(entry: &PasswordEntry) -> bool {
     entry.expires_at != 0 && now() > entry.expires_at
 }
 
-pub const OWNER_TUNNEL_IP: &str = "10.66.67.2";
+pub fn valid_tunnel_password(password: &str) -> bool {
+    !password.is_empty()
+        && password.len() <= 128
+        && password.trim() == password
+        && !password.chars().any(|ch| ch == '|' || ch.is_control())
+}
+
+pub fn available_client_ip(db: &Database, ip: &str) -> bool {
+    let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let octets = ipv4.octets();
+    octets[..3] == crate::net_setup::NETWORK.prefix
+        && (3..=250).contains(&octets[3])
+        && !db.passwords.values().any(|entry| entry.ip == ip)
+}
 
 pub fn get_next_ip(db: &Database) -> Option<String> {
-    let mut buf = String::with_capacity(16);
     for i in 3..=250u8 {
-        buf.clear();
-        use std::fmt::Write;
-        let _ = write!(buf, "10.66.67.{i}");
-        let is_used = db.passwords.values().any(|d| d.ip == buf);
-        if !is_used {
-            return Some(buf);
+        let ip = crate::net_setup::tunnel_address(i);
+        if available_client_ip(db, &ip) {
+            return Some(ip);
         }
     }
     None
@@ -740,7 +749,7 @@ pub fn get_next_ip(db: &Database) -> Option<String> {
 
 pub fn resolve_session_ip(db: &Database, session_password: &str) -> Option<String> {
     if secret_eq(session_password, &db.main_password) {
-        return Some(OWNER_TUNNEL_IP.to_owned());
+        return Some(crate::net_setup::tunnel_address(2));
     }
     db.passwords.get(session_password).and_then(|entry| {
         if !entry.ip.is_empty() {
@@ -2495,5 +2504,58 @@ mod tests {
             .expect("participant slot exists");
         assert_eq!(participant.ip, "10.66.67.3");
         let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn password_delimiters_and_controls_are_rejected() {
+        for pw in ["a|b", "a\nb", "a\rb", "a\0b", " edge", "edge ", ""] {
+            assert!(!valid_tunnel_password(pw), "{pw:?}");
+        }
+        assert!(valid_tunnel_password("тест-password-123"));
+        assert!(!valid_tunnel_password(&"a".repeat(129)));
+    }
+    #[test]
+    fn loading_repairs_duplicate_and_reserved_ips() {
+        let mut db = Database::default();
+        for (password, host) in [("one", 3), ("two", 3), ("owner-collision", 2)] {
+            db.passwords.insert(
+                password.into(),
+                PasswordEntry {
+                    ip: crate::net_setup::tunnel_address(host),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!db.repair_stale_password_bindings().is_empty());
+        let ips: std::collections::HashSet<_> =
+            db.passwords.values().map(|e| e.ip.clone()).collect();
+        assert_eq!(ips.len(), 3);
+        assert!(!ips.contains(&crate::net_setup::tunnel_address(2)));
+    }
+    #[test]
+    fn only_free_client_addresses_are_available() {
+        let mut db = Database::default();
+        let ip = crate::net_setup::tunnel_address(3);
+        assert!(available_client_ip(&db, &ip));
+        for host in [0, 1, 2, 251, 255] {
+            assert!(!available_client_ip(
+                &db,
+                &crate::net_setup::tunnel_address(host)
+            ));
+        }
+        assert!(!available_client_ip(&db, "8.8.8.8"));
+        db.passwords.insert(
+            "client-one".into(),
+            PasswordEntry {
+                ip: ip.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(!available_client_ip(&db, &ip));
+        assert_eq!(get_next_ip(&db), Some(crate::net_setup::tunnel_address(4)));
     }
 }

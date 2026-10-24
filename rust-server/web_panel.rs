@@ -558,7 +558,7 @@ fn authorized(app: &App, headers: &HeaderMap) -> bool {
         .map(str::trim)
         && !key.is_empty()
     {
-        if secret_eq(key, &app.web_pass) || secret_eq(key, &app.startup_main_password) {
+        if secret_eq(key, &app.web_pass) {
             return true;
         }
         if let Ok(db) = app.db.try_read()
@@ -585,7 +585,7 @@ fn authorized(app: &App, headers: &HeaderMap) -> bool {
     {
         let token = token.trim();
         if !token.is_empty() {
-            if secret_eq(token, &app.web_pass) || secret_eq(token, &app.startup_main_password) {
+            if secret_eq(token, &app.web_pass) {
                 return true;
             }
             if let Ok(db) = app.db.try_read()
@@ -1309,11 +1309,11 @@ async fn settings_post(
 ) -> Response {
     if let Some(password) = request.main_password.as_ref()
         && !password.is_empty()
-        && password.len() > 128
+        && !model::valid_tunnel_password(password)
     {
         return (
             StatusCode::BAD_REQUEST,
-            "password length must be 1..128 or empty",
+            "password must be empty or 1..128 bytes without pipes or control characters",
         )
             .into_response();
     }
@@ -1582,7 +1582,7 @@ async fn clients_get(
                 vk_hash: entry.vk_hash.clone(),
                 ports: entry.ports.clone(),
                 ip: if entry.ip.is_empty() {
-                    "10.66.67.3".to_string()
+                    crate::net_setup::tunnel_address(3)
                 } else {
                     entry.ip.clone()
                 },
@@ -1626,7 +1626,7 @@ async fn clients_get(
             active_sessions: count_active_sessions(&state.app.sessions, &db.main_password),
             vk_hash: String::new(),
             ports: String::new(),
-            ip: "10.66.67.2".to_string(),
+            ip: crate::net_setup::tunnel_address(2),
             name: "Владелец".to_string(),
             vk_hashes: if db.main_vk_hashes.is_empty() {
                 db.vk_hashes.clone()
@@ -1706,7 +1706,7 @@ async fn group_clients_get(
                 vk_hash: entry.vk_hash.clone(),
                 ports: entry.ports.clone(),
                 ip: if entry.ip.is_empty() {
-                    "10.66.67.3".to_string()
+                    crate::net_setup::tunnel_address(3)
                 } else {
                     entry.ip.clone()
                 },
@@ -1814,10 +1814,10 @@ async fn clients_create(
 
         let password = if let Some(ref custom_pw) = request.password {
             let pw = custom_pw.trim();
-            if pw.is_empty() || pw.len() > 128 {
+            if !model::valid_tunnel_password(pw) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "password must be 1..128 characters",
+                    "password must be 1..128 bytes without pipes or control characters",
                 )
                     .into_response();
             }
@@ -2073,7 +2073,7 @@ async fn client_get(
             active_sessions,
             vk_hash: String::new(),
             ports: String::new(),
-            ip: "10.66.67.2".to_string(),
+            ip: crate::net_setup::tunnel_address(2),
             name: "Главный пароль".to_string(),
             vk_hashes: if db.main_vk_hashes.is_empty() {
                 db.vk_hashes.clone()
@@ -2109,7 +2109,7 @@ async fn client_get(
             vk_hash: entry.vk_hash.clone(),
             ports: entry.ports.clone(),
             ip: if entry.ip.is_empty() {
-                "10.66.67.3".to_string()
+                crate::net_setup::tunnel_address(3)
             } else {
                 entry.ip.clone()
             },
@@ -2485,10 +2485,10 @@ async fn api_settings_master_password(
     State(state): State<WebState>,
     Json(request): Json<MasterPasswordRequest>,
 ) -> Response {
-    if !request.password.is_empty() && request.password.len() > 128 {
+    if !request.password.is_empty() && !model::valid_tunnel_password(&request.password) {
         return (
             StatusCode::BAD_REQUEST,
-            "password length must be 1..128 or empty",
+            "password must be empty or 1..128 bytes without pipes or control characters",
         )
             .into_response();
     }
@@ -2628,12 +2628,24 @@ async fn api_import_post(
     };
     let do_clients = payload.import_clients.unwrap_or(true);
     let do_settings = payload.import_settings.unwrap_or(true);
+    if (do_clients
+        && export
+            .clients
+            .iter()
+            .any(|c| !model::valid_tunnel_password(&c.password)))
+        || (do_settings
+            && !export.main_password.is_empty()
+            && !model::valid_tunnel_password(&export.main_password))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid tunnel password in import").into_response();
+    }
     let mut added_clients = 0usize;
     let mut applied_dns = None;
     let mut applied_interval = None;
 
     let revision = {
-        let mut db = state.app.db.write().await;
+        let mut guard = state.app.db.write().await;
+        let mut db = guard.clone();
         if do_clients {
             for c in export.clients {
                 if !db.passwords.contains_key(&c.password) {
@@ -2642,10 +2654,22 @@ async fn api_import_post(
                     } else {
                         c.sub_uuid
                     };
-                    let ip = if c.ip.is_empty() {
-                        model::get_next_ip(&db).unwrap_or_default()
-                    } else {
+                    if c.password == db.main_password
+                        || (do_settings && c.password == export.main_password)
+                    {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            "client password conflicts with master password",
+                        )
+                            .into_response();
+                    }
+                    let ip = if model::available_client_ip(&db, &c.ip) {
                         c.ip
+                    } else if let Some(ip) = model::get_next_ip(&db) {
+                        ip
+                    } else {
+                        return (StatusCode::BAD_REQUEST, "tunnel address pool exhausted")
+                            .into_response();
                     };
                     let client_name = if c.name.trim().is_empty()
                         || model::is_client_name_taken(
@@ -2713,7 +2737,9 @@ async fn api_import_post(
                 db.vk_hashes = export.vk_hashes;
             }
         }
-        state.app.db_persistence.submit(db.clone())
+        let revision = state.app.db_persistence.submit(db.clone());
+        *guard = db;
+        revision
     };
 
     if let Err(response) = wait_for_persistence(&state, revision).await {
@@ -3625,8 +3651,8 @@ async fn group_admin_data_get(
                 "active": !p_entry.is_deactivated && !model::is_expired(p_entry),
                 "is_deactivated": p_entry.is_deactivated,
                 "active_sessions": count_active_sessions(&state.app.sessions, _pass),
-                "ip": if p_entry.ip.is_empty() { "10.66.67.3" } else { &p_entry.ip },
-                "device_ip": if p_entry.ip.is_empty() { "10.66.67.3" } else { &p_entry.ip },
+                "ip": if p_entry.ip.is_empty() { crate::net_setup::tunnel_address(3) } else { p_entry.ip.clone() },
+                "device_ip": if p_entry.ip.is_empty() { crate::net_setup::tunnel_address(3) } else { p_entry.ip.clone() },
                 "group_id": p_entry.group_id,
                 "peer_port": p_entry.wg_port,
                 "vk_hashes": p_entry.vk_hashes,
@@ -4007,7 +4033,7 @@ async fn group_admin_client_update(
         None
     };
 
-    let entry = db.passwords.get_mut(&password).unwrap();
+    let mut entry = db.passwords.get(&password).unwrap().clone();
     if let Some(name) = validated_name {
         entry.name = name;
     }
@@ -4039,6 +4065,7 @@ async fn group_admin_client_update(
             entry.vk_hashes.clear();
         }
     }
+    db.passwords.insert(password, entry);
     let snapshot = db.clone();
     drop(db);
     state.app.db_persistence.submit(snapshot);
@@ -5492,8 +5519,6 @@ pub async fn run(
             .route(&trailing_prefix, get(panel_root))
             .nest(&prefix, panel_routes);
         router = router
-            .route("/manifest.webmanifest", get(pwa_manifest))
-            .route("/sw.js", get(pwa_service_worker))
             .route("/pwa-icon.svg", get(pwa_icon))
             .route("/pwa-icon-192.png", get(pwa_icon_192))
             .route("/pwa-icon-512.png", get(pwa_icon_512))

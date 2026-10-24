@@ -205,10 +205,17 @@ async fn handle_client(
                 _ = cancel.cancelled() => break,
                 read = reader.read(&mut buffer) => match read? {
                     0 => break,
-                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?)).await?,
+                    length => {
+                        dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?)).await?;
+                        dispatcher.stats.total_bytes_up.fetch_add(length as i64, Ordering::Relaxed);
+                    },
                 },
                 inbound = rx.recv() => match inbound {
-                    Some(Inbound::Data(data)) => writer.write_all(received.decode(&data)?).await?,
+                    Some(Inbound::Data(data)) => {
+                        let bytes = received.decode(&data)?;
+                        dispatcher.stats.total_bytes_down.fetch_add(bytes.len() as i64, Ordering::Relaxed);
+                        writer.write_all(bytes).await?;
+                    },
                     Some(Inbound::Closed | Inbound::Error(_)) | None => break,
                     Some(Inbound::Opened) => {}
                 },
